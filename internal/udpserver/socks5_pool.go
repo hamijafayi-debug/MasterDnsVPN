@@ -85,10 +85,13 @@ type socks5UpstreamPool struct {
 
 	// Lifetime / reaper bookkeeping. closed is set during Close so Put
 	// rejects further inserts (instead of leaking on shutdown). The
-	// reaper goroutine watches reaperStop.
+	// reaper goroutine watches reaperStop. Step 19 added reaperWG so
+	// callers can deterministically join the reaper exit (previously
+	// only Close could signal stop, but there was no way to wait).
 	closed     bool
 	reaperOnce sync.Once
 	reaperStop chan struct{}
+	reaperWG   sync.WaitGroup
 
 	// Lightweight counters surfaced via the metrics package. Stored as
 	// regular int64 under the same mu lock — pool ops are not on a
@@ -344,8 +347,40 @@ func (p *socks5UpstreamPool) startReaper(ctx context.Context) {
 		return
 	}
 	p.reaperOnce.Do(func() {
-		go p.reaperLoop(ctx)
+		p.reaperWG.Add(1)
+		go func() {
+			defer p.reaperWG.Done()
+			p.reaperLoop(ctx)
+		}()
 	})
+}
+
+// WaitForShutdown blocks until the reaper goroutine has returned, or
+// the supplied timeout elapses. Returns true on clean exit, false on
+// timeout. Caller must have already cancelled ctx or called Close,
+// otherwise this will always hit the timeout. Added in Step 19 to
+// give the server a deterministic teardown.
+func (p *socks5UpstreamPool) WaitForShutdown(timeout time.Duration) bool {
+	if p == nil || !p.Enabled() {
+		return true
+	}
+	done := make(chan struct{})
+	go func() {
+		p.reaperWG.Wait()
+		close(done)
+	}()
+	if timeout <= 0 {
+		<-done
+		return true
+	}
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		return false
+	}
 }
 
 func (p *socks5UpstreamPool) reaperLoop(ctx context.Context) {
