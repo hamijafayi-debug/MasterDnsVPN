@@ -220,13 +220,23 @@ func main() {
 	var app *client.Client
 	switch {
 	case opts.jsonBase64 != "":
-		cfg, err := config.LoadClientConfigFromJSONBase64WithOverrides(opts.jsonBase64, overrides)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Client startup failed: %v\n", err)
+		// NOTE: the inner `cfg, err :=` declares a new `err` scoped to this
+		// case clause. Previously the second `app, err = ...` reused that
+		// inner `err`, so any Bootstrap failure here was *silently dropped*
+		// — the outer-scope `err` (checked on the line below the switch)
+		// stayed nil and the program would happily continue into
+		// `app.PrintBanner()` with a nil app, segfaulting on real load
+		// errors. Fix: bind the bootstrap result to an explicit local and
+		// promote it back into the outer `err` before falling out.
+		cfg, loadErr := config.LoadClientConfigFromJSONBase64WithOverrides(opts.jsonBase64, overrides)
+		if loadErr != nil {
+			fmt.Fprintf(os.Stderr, "Client startup failed: %v\n", loadErr)
 			waitForExitInput()
 			os.Exit(1)
 		}
-		app, err = client.BootstrapLoadedConfig(cfg, opts.logPath)
+		var bootstrapErr error
+		app, bootstrapErr = client.BootstrapLoadedConfig(cfg, opts.logPath)
+		err = bootstrapErr
 		resolvedConfigPath = cfg.ConfigPath
 	case opts.jsonPath != "":
 		app, err = client.Bootstrap(runtimepath.Resolve(opts.jsonPath), opts.logPath, overrides)

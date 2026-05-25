@@ -298,3 +298,22 @@ func TestLoadServerConfigFromJSONBase64WithOverridesAppliesBeforeFinalize(t *tes
 		t.Fatalf("unexpected override domain: %+v", cfg.Domain)
 	}
 }
+
+// TestServerConfigFlagBinderOverridesOnNilReceiver — see the matching note
+// on TestClientConfigFlagBinderOverridesOnNilReceiver. Same SA5011 fix
+// applied symmetrically to ServerConfigFlagBinder.
+func TestServerConfigFlagBinderOverridesOnNilReceiver(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Overrides() panicked on nil receiver: %v", r)
+		}
+	}()
+	var b *ServerConfigFlagBinder
+	got := b.Overrides()
+	if got.Values == nil {
+		t.Fatal("Overrides().Values must be non-nil even for nil binder")
+	}
+	if len(got.Values) != 0 {
+		t.Fatalf("Overrides().Values must be empty for nil binder, got %d entries", len(got.Values))
+	}
+}
