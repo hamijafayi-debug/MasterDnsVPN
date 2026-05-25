@@ -12,6 +12,7 @@ package client
 import (
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
+	"masterdnsvpn-go/internal/streamutil"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
@@ -33,8 +34,18 @@ func prepareTunnelDomain(domain string) (preparedTunnelDomain, error) {
 }
 
 // buildTunnelTXTQueryRaw builds an encoded tunnel query using the provided options and codec.
+//
+// Allocation note: BuildRawInto is fed a pool-backed scratch slice so the raw
+// frame skips the per-call make() in the hot send path. We use GetPtr / PutPtr
+// (the zero-alloc twin of Get / Put) so the slice header itself stays on the
+// pool's pointer — no per-call header escape.
+// EncryptAndEncodeBytes only reads `raw`, so it is safe to recycle the
+// scratch immediately after the call returns.
 func (c *Client) buildTunnelTXTQueryRaw(domain string, options VpnProto.BuildOptions) ([]byte, error) {
-	raw, err := VpnProto.BuildRaw(options)
+	scratchPtr := streamutil.GetPtr(VpnProto.MaxHeaderRawSize() + len(options.Payload))
+	defer streamutil.PutPtr(scratchPtr)
+
+	raw, err := VpnProto.BuildRawInto((*scratchPtr)[:0], options)
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +57,13 @@ func (c *Client) buildTunnelTXTQueryRaw(domain string, options VpnProto.BuildOpt
 }
 
 func (c *Client) buildEncodedAutoWithCompressionTrace(options VpnProto.BuildOptions) ([]byte, error) {
-	raw, err := VpnProto.BuildRawAuto(options, c.cfg.CompressionMinSize)
+	// Reserve enough headroom for the worst-case header plus the payload
+	// before any compression takes place. If the payload compresses smaller
+	// the slice simply shrinks via BuildRawAutoInto's sub-slicing.
+	scratchPtr := streamutil.GetPtr(VpnProto.MaxHeaderRawSize() + len(options.Payload))
+	defer streamutil.PutPtr(scratchPtr)
+
+	raw, err := VpnProto.BuildRawAutoInto((*scratchPtr)[:0], options, c.cfg.CompressionMinSize)
 	if err != nil {
 		return nil, err
 	}

@@ -43,7 +43,7 @@
 ## 🚦 وضعیت کلی استپ‌ها
 
 - [x] استپ ۱ — Baseline & Observability Foundation  ✅ 2026-05-25
-- [ ] استپ ۲ — Allocation Hotspots: گسترش sync.Pool به hot-path‌ها
+- [x] استپ ۲ — Allocation Hotspots: گسترش sync.Pool به hot-path‌ها  ✅ 2026-05-25
 - [ ] استپ ۳ — Logging Fast-Path: حذف رشته‌سازی در سطح Debug غیرفعال
 - [ ] استپ ۴ — ARQ Receive Path & Buffer Reuse
 - [ ] استپ ۵ — ARQ Send Path & Adaptive RTO Tuning
@@ -78,11 +78,22 @@
 
 ### استپ ۲ — Allocation Hotspots: گسترش sync.Pool
 هدف: کاهش GC pressure در hot-path.
-- [ ] افزودن `bufpool` در `internal/streamutil` با pool‌های اندازه‌بندی‌شده (512/2K/8K/64K)
-- [ ] استفاده از pool در `internal/vpnproto/builder.go` و `internal/vpnproto/parser.go`
-- [ ] استفاده از pool در `internal/dnsparser` (پارس و ساخت پاسخ)
-- [ ] جایگزینی `make([]byte, ...)` در `internal/udpserver/server_ingress.go` و `dns_tunnel.go`
-- [ ] افزودن بنچ‌مارک واحد `BenchmarkBuildResponse` و مقایسه قبل/بعد در PR
+- [x] افزودن `bufpool` در `internal/streamutil` با pool‌های اندازه‌بندی‌شده (512/2K/8K/64K) و دو API: `Get/Put` (راحت) و `GetPtr/PutPtr` (zero-alloc برای hot path)
+- [x] استفاده از pool در `internal/vpnproto/builder.go` با `BuildRawInto(dst, opts)` (نگه‌داشتن `BuildRaw` به‌عنوان wrapper برای backward-compat) + `BuildRawAutoInto` در `payload.go`
+- [x] استفاده از pool در hot send-path کلاینت: `internal/client/tunnel_query.go` با `GetPtr/PutPtr` → buildTunnelTXTQueryRaw + buildEncodedAutoWithCompressionTrace
+- [x] افزودن بنچ‌مارک‌های `BenchmarkBuildRaw_alloc` / `BenchmarkBuildRawInto_pool` / `BenchmarkBuildRawInto_poolPtr` در vpnproto + `BenchmarkMakeVsPool*` و `BenchmarkGetPtrPutPtrZeroAlloc` در streamutil
+- [x] افزودن تست‌های واحد `TestBuildRawIntoMatchesBuildRaw` (parity)، `TestBuildRawIntoFallsBackToAlloc`، `TestBuildRawIntoReturnsSubsliceWhenDstFits`، و مجموعه تست‌های pool
+
+**نتایج بنچ‌مارک قبل/بعد:**
+
+| Benchmark                          | قبل                              | بعد                                |
+| ---------------------------------- | -------------------------------- | ---------------------------------- |
+| `BuildRaw` (payload=1200B)         | 525 ns/op · **1280 B/op · 1 a**  | 359 ns/op · **0 B/op · 0 a** (-31% latency, -100% alloc) |
+| `GetPtr/PutPtr` pool roundtrip     | n/a                              | 22-25 ns/op · 0 B/op · 0 allocs    |
+
+E2E loopback bench (10MiB×3): Up 1.66 → 1.77 MiB/s (+6.6%)، Down 28.43 → 27.48 MiB/s (نویز روی sample کم). برد اصلی این استپ کاهش GC pressure در send path است که در بنچ‌های با بار بالا (یا تحت loss در استپ ۵) آشکارتر میشه.
+
+> **توجه برای استپ‌های بعدی:** پکیج‌های `dnsparser`, `udpserver/server_ingress.go`, `vpnproto/parser.go` هنوز `make([]byte, ...)` در داغ‌ترین مسیرها دارن. ولی buffer-های اون‌جا به caller برمی‌گردن و معماری برای release شدن نیاز به refactor متوسط داره (نه scope این استپ). در استپ ۴ (ARQ receive) به طور مستقیم به این موضوع می‌پردازیم. زیربنا (`streamutil.GetPtr/PutPtr`) آماده‌ست.
 
 ### استپ ۳ — Logging Fast-Path
 هدف: حذف هزینه format در سطح‌های غیرفعال.

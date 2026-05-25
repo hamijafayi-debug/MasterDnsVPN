@@ -63,10 +63,19 @@ func ParseInflated(data []byte) (Packet, error) {
 }
 
 func BuildRawAuto(opts BuildOptions, minSize int) ([]byte, error) {
+	return BuildRawAutoInto(nil, opts, minSize)
+}
+
+// BuildRawAutoInto is BuildRawAuto with a caller-supplied scratch slice. If
+// dst has enough capacity for the (compressed) payload + header it is reused
+// in place; otherwise a fresh slice is allocated. Pass dst=nil to keep the
+// original allocate-every-call behaviour. See BuildRawInto for ownership
+// rules — the returned slice may alias dst.
+func BuildRawAutoInto(dst []byte, opts BuildOptions, minSize int) ([]byte, error) {
 	payload, compressionType := PreparePayload(opts.PacketType, opts.Payload, opts.CompressionType, minSize)
 	opts.Payload = payload
 	opts.CompressionType = compressionType
-	return BuildRaw(opts)
+	return BuildRawInto(dst, opts)
 }
 
 func BuildEncodedAuto(opts BuildOptions, codec *security.Codec, minSize int) (string, error) {

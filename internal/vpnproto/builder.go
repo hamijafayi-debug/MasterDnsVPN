@@ -22,6 +22,27 @@ type BuildOptions struct {
 }
 
 func BuildRaw(opts BuildOptions) ([]byte, error) {
+	return BuildRawInto(nil, opts)
+}
+
+// BuildRawInto serialises a packet exactly like BuildRaw, but reuses the
+// caller-provided dst slice when it has enough capacity. It always returns
+// the sub-slice that contains the serialised bytes (length =
+// headerLen+len(opts.Payload)).
+//
+// Pass dst=nil (or a zero-cap slice) to fall back to allocating a fresh
+// buffer — the existing BuildRaw call site is exactly this case.
+//
+// Typical hot-path use:
+//
+//	scratch := streamutil.Get(vpnproto.MaxHeaderRawSize() + len(payload))
+//	raw, _  := vpnproto.BuildRawInto(scratch, opts)
+//	... consume raw (e.g. encrypt+encode) ...
+//	streamutil.Put(scratch)
+//
+// The returned slice always aliases dst when dst is large enough — callers
+// must not Put dst back to the pool while raw is still in use.
+func BuildRawInto(dst []byte, opts BuildOptions) ([]byte, error) {
 	flags := packetFlags[opts.PacketType]
 	if flags&packetFlagValid == 0 {
 		return nil, ErrInvalidPacketType
@@ -41,7 +62,13 @@ func BuildRaw(opts BuildOptions) ([]byte, error) {
 		headerLen++
 	}
 
-	raw := make([]byte, headerLen+len(opts.Payload))
+	total := headerLen + len(opts.Payload)
+	var raw []byte
+	if cap(dst) >= total {
+		raw = dst[:total]
+	} else {
+		raw = make([]byte, total)
+	}
 	raw[0] = opts.SessionID
 	raw[1] = opts.PacketType
 	offset := 2
