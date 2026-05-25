@@ -324,6 +324,11 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		cfg.AutoDisableTimeoutServers,
 		time.Duration(cfg.AutoDisableTimeoutWindowSeconds*float64(time.Second)),
 	)
+	// Step 15: wire the lightweight circuit-breaker + reactivation probation.
+	c.balancer.SetResolverHealthConfig(
+		cfg.ResolverCBConsecutiveTimeouts,
+		time.Duration(cfg.ResolverReactivationProbationMS)*time.Millisecond,
+	)
 
 	c.balancer.SetResolverDisabledHandler(func(conn *Connection, cause string) {
 		c.appendMTURemovedServerLine(conn, cause)

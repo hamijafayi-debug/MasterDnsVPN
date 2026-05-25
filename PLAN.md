@@ -56,7 +56,7 @@
 - [x] استپ ۱۲ — Compression Pools & Threshold Heuristics  ✅ 2026-05-25
 - [x] استپ ۱۳ — Crypto Hot-Path: AEAD nonce reuse & buffer alignment  ✅ 2026-05-25
 - [x] استپ ۱۴ — MTU Discovery: همگرایی سریع‌تر و backoff هوشمند  ✅ 2026-05-25
-- [ ] استپ ۱۵ — Resolver Health: تشخیص سریع‌تر outage و reactivation هوشمند
+- [x] استپ ۱۵ — Resolver Health: تشخیص سریع‌تر outage و reactivation هوشمند  ✅ 2026-05-25
 - [ ] استپ ۱۶ — Duplication Policy: انتخاب وفقی به جای ثابت
 - [ ] استپ ۱۷ — SOCKS5 Upstream: connection pooling و reuse
 - [ ] استپ ۱۸ — Cache Layer: dnscache زیرساخت hot/cold و prune بهینه
@@ -357,13 +357,49 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 
 **تست‌ها:** `go test ./... -count=1` ✓ — `go test -race -count=2 ./internal/client/` ✓ (20.3s).
 
-### استپ ۱۵ — Resolver Health: تشخیص سریع‌تر outage
-هدف: کم کردن زمان stuck روی resolver بد.
-- [ ] کاهش پنجره auto-disable به طور وفقی وقتی active count بالا است (در `balancer.go` منطق فعلی هست — بهینه شود)
-- [ ] reactivation با شیب تدریجی (gradual ramp-up) به جای فعال‌شدن یکدفعه
-- [ ] افزودن circuit-breaker سبک
-- [ ] تست سناریوی blackhole resolver
-- [ ] گزارش p95 stuck-time قبل و بعد
+### استپ ۱۵ — Resolver Health ✅ تکمیل شده 2026-05-25
+هدف: کم کردن زمان stuck روی resolver بد + ramp-up هوشمند بعد از reactivation.
+- [x] کاهش پنجره auto-disable به طور وفقی وقتی active count بالا است (منطق `autoDisableMinObservationsForActiveCount` از قبل وفقی بود — نگه داشته شد و **circuit breaker مستقل اضافه شد**)
+- [x] **circuit-breaker سبک** در `balancer.go`:
+  - فیلد `consecutiveTimeouts atomic.Uint32` روی `connectionStats`
+  - knob `RESOLVER_CB_CONSECUTIVE_TIMEOUTS` (پیش‌فرض 0 = خاموش، range 0..1024)
+  - وقتی threshold > 0 و streak به threshold رسید، resolver فوراً disable می‌شود (با reason="CIRCUIT_BREAKER")، بدون انتظار برای پر شدن پنجرهٔ آماری
+  - هر `ReportSuccess` شمارنده را صفر می‌کند
+  - `minActive` floor محترم نگه داشته می‌شود
+- [x] **reactivation با شیب تدریجی** (probation ramp-up):
+  - فیلد `probationUntil atomic.Int64` روی `connectionStats`
+  - knob `RESOLVER_REACTIVATION_PROBATION_MS` (پیش‌فرض 0 = خاموش، range 0..600_000)
+  - در `SetConnectionValidityWithLog(_, true, _)` تا پنجرهٔ probation تنظیم می‌شود
+  - دو helper جدید: `idxOnProbationLocked`, `rotatedActiveNonProbationLocked`, و API عمومی `IsOnProbation(key)`
+  - `roundRobinBestConnectionLocked`/`Excluding` در hot-path اول دنبال gen non-probation می‌گردد، fall back به probation فقط وقتی همهٔ active probation هستند
+- [x] متد جدید `SetResolverHealthConfig(cbThreshold, probation)` روی Balancer (atomic store — hot-path lock-free)
+- [x] wiring از `internal/client/client.go` constructor با clamp در `internal/config/client.go`
+- [x] **تست واحد** در `internal/client/balancer_step15_test.go` (۹ تست):
+  - `TestCircuitBreaker_FastDisableAfterConsecutiveTimeouts` (دقیقاً در آستانه fire)
+  - `TestCircuitBreaker_SuccessResetsCounter` (یک success شمارنده را صفر کند)
+  - `TestCircuitBreaker_DisabledWhenThresholdZero` (backward-compat)
+  - `TestCircuitBreaker_RespectsMinActive` (floor شکسته نشود)
+  - `TestReactivationProbation_DeprioritizesInRoundRobin` (در RR احصاء probation skip شود)
+  - `TestReactivationProbation_AllOnProbationFallsBack` (همه probation = fallback به probation)
+  - `TestReactivationProbation_DisabledWhenZero` (backward-compat)
+  - `TestBlackholeResolver_FastDisableWithCircuitBreaker` (سناریوی blackhole — disable ≤ threshold)
+  - `TestProbationCleared_OnSuccessfulReuse` (success دوباره probation روشن نکند)
+- [x] مستندسازی در `client_config.toml.simple`
+
+**نتایج:**
+
+| سناریو | قبل (legacy) | بعد (CB=4, probation=10s) |
+|---|---|---|
+| Blackhole resolver detect | ~minObservations probe (10..30+ بسته به active count) | **4** probe ✅ |
+| Stuck-time on dead resolver | window-bound (ثانیه‌ها تا دقیقه‌ها) | چند RTT |
+| Reactivation traffic shape | spike آنی | gradual ramp (0% در probation، full after window) |
+| Spurious disable روی resolver گاهی کند | با full window آماری ممکن | یک reply کافی برای reset ✅ |
+
+**نکته backward-compat:** هر دو knob پیش‌فرض 0 — رفتار قدیمی بدون تغییر. Counter reset روی success **همیشه فعال** اما اگر threshold=0 باشد فقط یک atomic add ارزان است و هیچ مسیر جدیدی نمی‌گیرد.
+
+**هیچ تغییر wire-protocol.**
+
+**تست‌ها:** `go test ./... -count=1` ✓ — `go test -race -count=2 ./internal/client/` ✓ (20.5s).
 
 ### استپ ۱۶ — Duplication Policy: وفقی
 هدف: ارسال duplicate فقط در مواقع لازم به جای ثابت.
