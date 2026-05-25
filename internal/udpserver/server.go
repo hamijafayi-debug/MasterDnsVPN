@@ -88,6 +88,10 @@ type Server struct {
 	lastDeferredDropLogUnix  atomic.Int64
 	pongNonce                atomic.Uint32
 	invalidDropMode          atomic.Uint32
+	// Step 19 — bookkeeping for background goroutines whose lifetimes
+	// are bounded only by ctx.Done(). Run() uses this to guarantee no
+	// goroutine outlives the call (deterministic teardown).
+	backgroundWG sync.WaitGroup
 }
 
 type request struct {
@@ -353,11 +357,16 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	// Step 18 — DNS cache amortized pruner. 0 interval keeps the
 	// legacy lazy-on-read behaviour. The pruner exits cleanly when
-	// runCtx is cancelled below.
+	// runCtx is cancelled below. Step 19 wires it into backgroundWG
+	// so Run() can join on its exit deterministically.
 	if s.cfg.DNSCachePruneIntervalSeconds > 0 && s.dnsCache != nil {
 		interval := time.Duration(s.cfg.DNSCachePruneIntervalSeconds * float64(time.Second))
 		maxScan := s.cfg.DNSCachePruneMaxScanPerShard
-		go s.runDNSCachePruner(runCtx, interval, maxScan)
+		s.backgroundWG.Add(1)
+		go func() {
+			defer s.backgroundWG.Done()
+			s.runDNSCachePruner(runCtx, interval, maxScan)
+		}()
 	}
 	s.startDNSWorkers(runCtx, conns[0], reqCh, &workerWG)
 
@@ -377,6 +386,42 @@ func (s *Server) Run(ctx context.Context) error {
 	workerWG.Wait()
 	cancel()
 	<-cleanupDone
+
+	// Step 19 — drain the deferred-session workers so the server's Run
+	// returns only after every goroutine it started has exited. Previously
+	// these workers were ctx-only and could outlive Run() by a few ms,
+	// which broke goroutine-leak assertions and made tests racy when the
+	// server was restarted.
+	if s.deferredDNSSession != nil {
+		s.deferredDNSSession.WaitForShutdown(2 * time.Second)
+	}
+	if s.deferredConnectSession != nil {
+		s.deferredConnectSession.WaitForShutdown(2 * time.Second)
+	}
+	if s.socks5UpstreamPool != nil {
+		// reaper was started above and Close() was deferred — by the
+		// time we get here both ctx is cancelled AND Close has run
+		// (deferred runs in LIFO so it fires before openUDPListeners'
+		// cleanup). We just need to join the reaper goroutine.
+		s.socks5UpstreamPool.WaitForShutdown(2 * time.Second)
+	}
+	// Hard-stop budget for any other ctx-driven background goroutines
+	// (DNSCachePruner, future additions). We give them up to 2s to drain;
+	// if they overshoot, log and continue rather than block forever — the
+	// caller is already shutting down so leaking briefly is preferable to
+	// hanging Run() indefinitely.
+	bgDone := make(chan struct{})
+	go func() {
+		s.backgroundWG.Wait()
+		close(bgDone)
+	}()
+	select {
+	case <-bgDone:
+	case <-time.After(2 * time.Second):
+		if s.log != nil {
+			s.log.Warnf("⏱️  <yellow>Background goroutines failed to drain within 2s — proceeding with shutdown</yellow>")
+		}
+	}
 
 	if ctx.Err() != nil {
 		return ctx.Err()

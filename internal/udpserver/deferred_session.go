@@ -35,6 +35,7 @@ type deferredSessionWorker struct {
 type deferredSessionProcessor struct {
 	log                *logger.Logger
 	workers            []deferredSessionWorker
+	wg                 sync.WaitGroup
 	mu                 sync.Mutex
 	laneWorker         map[deferredSessionLane]int
 	cancelled          map[deferredSessionLane]struct{}
@@ -113,7 +114,43 @@ func (p *deferredSessionProcessor) Start(ctx context.Context) {
 	}
 
 	for idx := range p.workers {
-		go p.runDeferredWorker(ctx, idx)
+		p.wg.Add(1)
+		go func(i int) {
+			defer p.wg.Done()
+			p.runDeferredWorker(ctx, i)
+		}(idx)
+	}
+}
+
+// WaitForShutdown blocks until every worker started by Start has
+// returned, or the supplied timeout elapses. Callers must have arranged
+// for ctx (passed to Start) to be cancelled, otherwise this will hit
+// the timeout. Returns true on clean shutdown, false on timeout.
+//
+// Added in Step 19 to give the server a deterministic teardown path
+// for its deferred-session workers — previously their lifecycle was
+// implicit (ctx-only, no wg) which made hard-stop guarantees and
+// goroutine-leak assertions impossible.
+func (p *deferredSessionProcessor) WaitForShutdown(timeout time.Duration) bool {
+	if p == nil {
+		return true
+	}
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	if timeout <= 0 {
+		<-done
+		return true
+	}
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		return false
 	}
 }
 
