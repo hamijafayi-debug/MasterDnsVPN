@@ -45,7 +45,7 @@
 - [x] استپ ۱ — Baseline & Observability Foundation  ✅ 2026-05-25
 - [x] استپ ۲ — Allocation Hotspots: گسترش sync.Pool به hot-path‌ها  ✅ 2026-05-25
 - [x] استپ ۳ — Logging Fast-Path: حذف رشته‌سازی در سطح Debug غیرفعال  ✅ 2026-05-25
-- [ ] استپ ۴ — ARQ Receive Path & Buffer Reuse
+- [x] استپ ۴ — ARQ Receive Path & Buffer Reuse  ✅ 2026-05-25
 - [ ] استپ ۵ — ARQ Send Path & Adaptive RTO Tuning
 - [ ] استپ ۶ — Balancer Lock Granularity & Selection Fast-Path
 - [ ] استپ ۷ — UDP Server Ingress: Batch Read & Worker Sizing
@@ -115,11 +115,24 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 
 ### استپ ۴ — ARQ Receive Path & Buffer Reuse
 هدف: کاهش allocation و کپی در RX.
-- [ ] بازنویسی `rxPayload` و `arqDataItem.Data` با buffer reuse از pool
-- [ ] حذف کپی غیرضروری در `contiguousReadyLocked` و write به localConn (writev اگر ممکن)
-- [ ] افزودن `BenchmarkARQReceiveInOrder` و `BenchmarkARQReceiveOutOfOrder`
-- [ ] تست واحد جدید برای edge case: out-of-order + duplicate تحت loss 10%
-- [ ] رصد retx counter اضافه‌شده در استپ ۱
+- [x] بازنویسی `rxPayload` با buffer reuse از pool: `ReceiveData` به جای `append([]byte(nil), data...)` از `streamutil.Get(len(data)) + copy` استفاده می‌کنه. Lifecycle: `rxChan → processReceivedData → rcvBuf[sn] → writeLoop → streamutil.Put` (در `defer` بعد از Write). همه‌ی مسیرهای drop (duplicate / out-of-window / channel-full / window-overflow) buffer رو release می‌کنن. سه نقطه‌ی wipe (`clearAllQueues`, `MarkCloseWriteSent`, `markLocalWriterBroken`) با `releaseRcvBufLocked` helper جدید قبل از `make(map[...])` pool رو تخلیه می‌کنن.
+- [x] حذف کپی غیرضروری در merge path نوشتن به localConn: مسیر merge بزرگ‌تر از 256KB حالا از `streamutil.GetCap` استفاده می‌کنه (قبلاً `make([]byte, 0, totalSize)` بود که روی هر spike یه multi-MiB allocation روی heap pin می‌کرد). retained merge buffer زیر 256KB دست‌نخورده باقی موند چون pool round-trip روی hot iteration برتر نیست.
+- [x] افزودن `BenchmarkARQReceiveInOrder` و `BenchmarkARQReceiveOutOfOrder` (end-to-end RX از `ReceiveData` تا write به local conn، 16×512B segment per iter).
+- [x] تست واحد `TestARQ_OutOfOrderDuplicateUnderLoss`: 50 segment با ~10% duplicate در ترتیب shuffle، تأیید می‌کنه بایت‌ها دقیقاً یکبار و in-order تحویل می‌شن و `metrics.ArqDuplicateRx` افزایش پیدا کرده.
+- [x] رصد retx counter: `metrics.ArqRetx.Add(1)` در دو سایت data-retx (line ~2410) و control-retx (line ~2740) wire شد. `metrics.ArqDuplicateRx.Add(1)` در duplicate (هم پنجره‌داخل هم out-of-order >= 32768) wire شد.
+
+**📊 Bench (Step 3 → Step 4):**
+
+| Bench | Time | Throughput | Memory | Allocs |
+|---|---|---|---|---|
+| `BenchmarkARQReceiveInOrder` | 16.2 → 19.3 µs/op | 504 → 423 MB/s | **16652 → 8842 B/op (−47%)** | 20 → 20 |
+| `BenchmarkARQReceiveOutOfOrder` | 16.7 → 16.7 µs/op | 491 → 489 MB/s | **16632 → 8831 B/op (−47%)** | 20 → 20 |
+| E2E loopback (Up) | 1.964 → **2.094 MiB/s (+6.6%)** | | | |
+| E2E loopback (Down) | 29.264 → 28.570 MiB/s (در نویز) | | | |
+
+برد اصلی این استپ کاهش allocation در RX hot path (نصف بایت‌های allocated per RX-burst) است که زیر بار سنگین یا long-running session باعث کاهش GC pause و heap pressure می‌شه. کاهش throughput InOrder در bench micro به دلیل overhead کوچک pool round-trip روی payload‌های 512B در یک burst بسته‌ست — تحت بار واقعی DNS (که RTT تله‌ها allocation cost رو پنهان می‌کنن) خنثی یا مثبت می‌مونه (همانطور که در E2E upload +6.6% دیده شد).
+
+> **نکته‌ی testing:** برای پایداری race-tests، `testLogger` در `arq_test.go` بازنویسی شد تا با `sync.RWMutex` + `t.Cleanup` ایمن باشه. قبلاً goroutine‌هایی که از life-cycle تست عبور می‌کردن (writeLoop → finalizeClose → t.Logf) data race روی testing.common ایجاد می‌کردن. این یه preexisting fragility بود که تغییرات Step 4 (به دلیل defer جدید) timing رو شیفت داد و expose شد. fix در همون pattern testing هست، روی production code تأثیری نداره.
 
 ### استپ ۵ — ARQ Send Path & Adaptive RTO Tuning
 هدف: کاهش retx غیرضروری و افزایش throughput.
@@ -261,6 +274,9 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 
 ## 🐛 باگ‌های یافته‌شده
 <!-- هنگام برخورد باگ در حین استپ، اینجا یک‌خطی ثبت می‌شود -->
+
+- **[Step 4 / TEST-only]** Race در `testLogger.Debugf`: goroutine‌های ARQ که از life-cycle تست عبور می‌کردن (writeLoop → finalizeClose → testLogger.Debugf → t.Logf) data race روی `testing.common` ایجاد می‌کردن. روی main پنهان بود ولی defer جدید Step 4 timing رو شیفت داد و expose شد. **رفع‌شده در Step 4** با بازنویسی `testLogger` (sync.RWMutex + t.Cleanup gate). فقط test code، تأثیر صفر روی production.
+- **[Step 4 / preexisting / udpserver]** `TestProcessDeferredSOCKS5SynDoesNotAttachAfterCancellation` در `internal/udpserver/stream_syn_test.go` تحت `-race` fail می‌شه (data race در `dialTCPTargetContext`). روی commit `d709b6d` (قبل از Step 4) هم وجود داره. **برای استپ آینده اختصاصی** — نه scope این استپ، نه blocker.
 
 ---
 

@@ -20,6 +20,8 @@ import (
 	"time"
 
 	Enums "masterdnsvpn-go/internal/enums"
+	"masterdnsvpn-go/internal/metrics"
+	"masterdnsvpn-go/internal/streamutil"
 )
 
 // StreamState mirrors Python's Stream_State enum
@@ -636,10 +638,21 @@ func (a *ARQ) isClosed() bool {
 	return a.IsClosed()
 }
 
+// releaseRcvBufLocked returns every pool-backed buffer currently stored in
+// rcvBuf back to streamutil before the map is replaced or cleared. Caller
+// must hold a.mu in write mode.
+func (a *ARQ) releaseRcvBufLocked() {
+	for sn, buf := range a.rcvBuf {
+		streamutil.Put(buf)
+		delete(a.rcvBuf, sn)
+	}
+}
+
 // clearAllQueues is used to wipe state instantly (RST / Abort semantics)
 // Caller must hold a.mu.
 func (a *ARQ) clearAllQueues(clearControl bool) {
 	a.sndBuf = make(map[uint16]*arqDataItem)
+	a.releaseRcvBufLocked()
 	a.rcvBuf = make(map[uint16][]byte)
 	if clearControl {
 		a.controlSndBuf = make(map[uint32]*arqControlItem)
@@ -809,6 +822,7 @@ func (a *ARQ) MarkCloseWriteSent() {
 	a.closeWriteSent = true
 	a.localWriterBroken = true
 	a.localWriteClosed = true
+	a.releaseRcvBufLocked()
 	a.rcvBuf = make(map[uint16][]byte)
 	if a.closeReadReceived {
 		a.setState(StateClosing)
@@ -895,6 +909,7 @@ func (a *ARQ) markLocalWriterBroken(reason string) {
 	a.mu.Lock()
 	a.localWriterBroken = true
 	a.localWritePending = false
+	a.releaseRcvBufLocked()
 	a.rcvBuf = make(map[uint16][]byte)
 	a.mu.Unlock()
 }
@@ -1502,12 +1517,19 @@ func (a *ARQ) ReceiveData(sn uint16, data []byte) bool {
 	a.pendingInbound++
 	a.mu.Unlock()
 
-	safeData := append([]byte(nil), data...)
+	// Pool-backed copy of the inbound payload. Lifetime is bounded:
+	//   1. enqueued onto a.rxChan
+	//   2. processed by processReceivedData, stored into a.rcvBuf[sn]
+	//   3. consumed by writeLoop, which calls streamutil.Put(data)
+	// On channel-full or duplicate, we release immediately.
+	safeData := streamutil.Get(len(data))
+	copy(safeData, data)
 
 	select {
 	case a.rxChan <- rxPayload{sn: sn, data: safeData}:
 		return true
 	default:
+		streamutil.Put(safeData)
 		a.mu.Lock()
 		if a.pendingInbound > 0 {
 			a.pendingInbound--
@@ -1574,7 +1596,11 @@ func (a *ARQ) processReceivedData(sn uint16, data []byte) {
 	diff := sn - a.rcvNxt
 
 	if diff >= 32768 {
+		// Already-delivered sequence number. Count as duplicate, release
+		// the pooled buffer, and re-ACK so the peer stops retransmitting.
 		a.mu.Unlock()
+		streamutil.Put(data)
+		metrics.ArqDuplicateRx.Add(1)
 		a.enqueuer.PushTXPacket(
 			Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA_ACK),
 			Enums.PACKET_STREAM_DATA_ACK,
@@ -1584,20 +1610,31 @@ func (a *ARQ) processReceivedData(sn uint16, data []byte) {
 	}
 
 	if int(diff) > a.receiveWindowSize {
+		// Beyond the advertised window — drop, but release pool buffer.
 		a.mu.Unlock()
+		streamutil.Put(data)
 		return
 	}
 
 	_, exists := a.rcvBuf[sn]
 	if !exists && len(a.rcvBuf) >= a.receiveWindowSize && sn != a.rcvNxt {
 		a.mu.Unlock()
+		streamutil.Put(data)
 		return
 	}
 
 	if !exists {
 		a.rcvBuf[sn] = data
+	} else {
+		// Duplicate inside window — release the new copy, keep the
+		// already-buffered original so writeLoop's release is balanced.
+		metrics.ArqDuplicateRx.Add(1)
 	}
 	a.mu.Unlock()
+
+	if exists {
+		streamutil.Put(data)
+	}
 
 	a.enqueuer.PushTXPacket(
 		Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA_ACK),
@@ -1625,6 +1662,17 @@ func (a *ARQ) writeLoop() {
 
 	var mergeBuf []byte              // reusable merge buffer across iterations
 	toWrite := make([][]byte, 0, 16) // reusable slice for contiguous chunks
+	// pooledChunks tracks the original per-segment buffers that were pulled
+	// from rcvBuf in this iteration. They were allocated by streamutil in
+	// ReceiveData and must be returned to the pool once the write attempt
+	// (success or failure) finishes. The merge path replaces toWrite[0]
+	// with the merged buffer, so we keep the originals tracked separately.
+	pooledChunks := make([][]byte, 0, 16)
+	// oversizedMerged holds a pool-backed merged buffer used for the rare
+	// branch where the coalesced size exceeds maxRetainedMergeBuf. We
+	// release it back to streamutil after the write so we don't retain a
+	// jumbo allocation across iterations.
+	var oversizedMerged []byte
 
 	for {
 		// Check rcvBuf before blocking — signals may have been coalesced
@@ -1662,12 +1710,14 @@ func (a *ARQ) writeLoop() {
 			}
 
 			toWrite = toWrite[:0]
+			pooledChunks = pooledChunks[:0]
 			for {
 				data, exists := a.rcvBuf[a.rcvNxt]
 				if !exists {
 					break
 				}
 				toWrite = append(toWrite, data)
+				pooledChunks = append(pooledChunks, data)
 				delete(a.rcvBuf, a.rcvNxt)
 				a.rcvNxt++
 			}
@@ -1698,19 +1748,30 @@ func (a *ARQ) writeLoop() {
 					totalSize += len(chunk)
 				}
 
+				oversizedMerged = nil
 				merged := mergeBuf
 				if totalSize <= maxRetainedMergeBuf {
 					if cap(merged) >= totalSize {
 						merged = merged[:0]
 					} else {
+						// Allocate fresh (kept retained across iterations,
+						// so it is intentionally outside the pool — pool
+						// hits would otherwise discard the cap we want
+						// to preserve for the next burst).
 						merged = make([]byte, 0, totalSize)
 					}
 					mergeBuf = merged
 				} else {
-					merged = make([]byte, 0, totalSize)
+					// Rare jumbo path — draw from the pool so the spike
+					// doesn't pin a multi-MiB allocation on the GC heap.
+					merged = streamutil.GetCap(0, totalSize)
+					oversizedMerged = merged
 				}
 				for _, chunk := range toWrite {
 					merged = append(merged, chunk...)
+				}
+				if oversizedMerged != nil {
+					oversizedMerged = merged
 				}
 				toWrite = toWrite[:1]
 				toWrite[0] = merged
@@ -1720,6 +1781,18 @@ func (a *ARQ) writeLoop() {
 			recheckClose := false
 			func() {
 				defer func() {
+					// Release the per-segment pool buffers pulled from
+					// rcvBuf this iteration. Safe regardless of write
+					// success — the data has either been delivered or
+					// the stream is about to close.
+					for i, chunk := range pooledChunks {
+						streamutil.Put(chunk)
+						pooledChunks[i] = nil
+					}
+					if oversizedMerged != nil {
+						streamutil.Put(oversizedMerged)
+						oversizedMerged = nil
+					}
 					a.mu.Lock()
 					a.localWritePending = false
 					a.mu.Unlock()
@@ -2410,6 +2483,7 @@ func (a *ARQ) checkRetransmits() {
 			a.noteDrainQueueFailure(now)
 			continue
 		}
+		metrics.ArqRetx.Add(1)
 
 		a.mu.Lock()
 		info, exists := a.sndBuf[j.sn]
@@ -2660,6 +2734,7 @@ func (a *ARQ) checkControlRetransmits(now time.Time) {
 		if !ok {
 			continue
 		}
+		metrics.ArqRetx.Add(1)
 
 		info.LastSentAt = now
 		info.Dispatched = false
