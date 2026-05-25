@@ -9,7 +9,6 @@ package dnsparser
 import (
 	"encoding/binary"
 	"errors"
-	"strings"
 )
 
 var (
@@ -23,6 +22,10 @@ var (
 const (
 	dnsHeaderSize = 12
 	maxNameJumps  = 10
+	// maxDNSName is the RFC 1035 hard limit on a wire-format domain name
+	// (255 bytes including length octets and the trailing root). Names
+	// fit on the stack comfortably at this size.
+	maxDNSName = 255
 )
 
 type Header struct {
@@ -102,6 +105,22 @@ func parsePacketLiteWithHeader(data []byte, header Header) (LitePacket, error) {
 		return packet, nil
 	}
 
+	// Fast path: the overwhelmingly common shape on the server hot path
+	// is a single-question query. Parse only the first question (no
+	// []Question slice allocation) and fast-skip the remaining ones.
+	if header.QDCount == 1 {
+		first, offset, err := parseFirstQuestion(data, dnsHeaderSize)
+		if err != nil {
+			return LitePacket{}, ErrInvalidQuestion
+		}
+		packet.FirstQuestion = first
+		packet.HasQuestion = true
+		packet.QuestionEndOffset = offset
+		return packet, nil
+	}
+
+	// Multi-question slow path: keep populating the full slice for
+	// callers that need it (currently only response_test exercises it).
 	questions, offset, err := parseQuestions(data, dnsHeaderSize, int(header.QDCount))
 	if err != nil {
 		return LitePacket{}, ErrInvalidQuestion
@@ -114,6 +133,25 @@ func parsePacketLiteWithHeader(data []byte, header Header) (LitePacket, error) {
 		packet.FirstQuestion = questions[0]
 	}
 	return packet, nil
+}
+
+// parseFirstQuestion parses exactly one DNS question starting at offset,
+// returning the parsed Question and the offset just past it. It allocates
+// only the name string (no []Question slice).
+func parseFirstQuestion(data []byte, offset int) (Question, int, error) {
+	name, nextOffset, err := parseName(data, offset)
+	if err != nil {
+		return Question{}, offset, ErrInvalidQuestion
+	}
+	if nextOffset+4 > len(data) {
+		return Question{}, nextOffset, ErrInvalidQuestion
+	}
+	q := Question{
+		Name:  name,
+		Type:  binary.BigEndian.Uint16(data[nextOffset : nextOffset+2]),
+		Class: binary.BigEndian.Uint16(data[nextOffset+2 : nextOffset+4]),
+	}
+	return q, nextOffset + 4, nil
 }
 
 func ParsePacket(data []byte) (Packet, error) {
@@ -252,11 +290,15 @@ func parseName(data []byte, offset int) (string, int, error) {
 		return "", offset, ErrInvalidName
 	}
 
+	// Stack-allocated scratch buffer sized to the RFC 1035 limit.
+	// Compiler keeps this in the parseName stack frame (no heap alloc)
+	// and we only allocate when converting to a string at the end.
 	var (
+		scratch  [maxDNSName]byte
+		nameLen  int
 		jumped   bool
 		jumps    int
 		origNext = offset
-		name     strings.Builder
 		hasLabel bool
 	)
 
@@ -301,13 +343,22 @@ func parseName(data []byte, offset int) (string, int, error) {
 			return "", origNext, ErrInvalidName
 		}
 
-		if name.Len() == 0 {
-			name.Grow(64)
-		} else {
-			name.WriteByte('.')
+		// Append "." separator before every label except the first.
+		// Bail out cleanly if the accumulated name would exceed the
+		// RFC 1035 hard limit (255 bytes wire-format, which translates
+		// to <= 253 presentation-format characters).
+		if hasLabel {
+			if nameLen+1+length > len(scratch) {
+				return "", origNext, ErrInvalidName
+			}
+			scratch[nameLen] = '.'
+			nameLen++
+		} else if length > len(scratch) {
+			return "", origNext, ErrInvalidName
 		}
 
-		writeLowerASCIILabel(&name, data[offset:end])
+		copyLowerASCIILabel(scratch[nameLen:nameLen+length], data[offset:end])
+		nameLen += length
 		hasLabel = true
 		offset = end
 		if !jumped {
@@ -318,30 +369,20 @@ func parseName(data []byte, offset int) (string, int, error) {
 	if !hasLabel {
 		return ".", origNext, nil
 	}
-	return name.String(), origNext, nil
+	// Single allocation: convert the scratch slice to a string.
+	return string(scratch[:nameLen]), origNext, nil
 }
 
-func writeLowerASCIILabel(dst *strings.Builder, label []byte) {
-	upperIndex := -1
-	for i := range label {
-		if label[i] >= 'A' && label[i] <= 'Z' {
-			upperIndex = i
-			break
-		}
-	}
-
-	if upperIndex == -1 {
-		dst.Write(label)
-		return
-	}
-
-	dst.Write(label[:upperIndex])
-	for i := upperIndex; i < len(label); i++ {
-		ch := label[i]
+// copyLowerASCIILabel copies src into dst (which MUST be the same length)
+// lower-casing ASCII uppercase letters in the process. DNS labels are
+// limited to 63 bytes so this is always small.
+func copyLowerASCIILabel(dst, src []byte) {
+	_ = dst[len(src)-1] // bounds-check elimination hint
+	for i := 0; i < len(src); i++ {
+		ch := src[i]
 		if ch >= 'A' && ch <= 'Z' {
-			dst.WriteByte(ch + ('a' - 'A'))
-		} else {
-			dst.WriteByte(ch)
+			ch += 'a' - 'A'
 		}
+		dst[i] = ch
 	}
 }

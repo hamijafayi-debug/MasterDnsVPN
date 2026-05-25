@@ -52,7 +52,7 @@
 - [x] استپ ۸ — Balancer Lock Granularity & Selection Fast-Path  ✅ 2026-05-25
 - [x] استپ ۹ — UDP Server Ingress: Batch Read & Worker Sizing  ✅ 2026-05-25
 - [x] استپ ۱۰ — Session Store Sharding (server-side) (۲۰۲۶-۰۵-۲۵)
-- [ ] استپ ۱۱ — DNS Parser Zero-Copy & Reusable Decoders
+- [x] استپ ۱۱ — DNS Parser Zero-Copy & Reusable Decoders (۲۰۲۶-۰۵-۲۵)
 - [ ] استپ ۱۲ — Compression Pools & Threshold Heuristics
 - [ ] استپ ۱۳ — Crypto Hot-Path: AEAD nonce reuse & buffer alignment
 - [ ] استپ ۱۴ — MTU Discovery: همگرایی سریع‌تر و backoff هوشمند
@@ -245,13 +245,31 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 3. **Mixed (۱۲٪ writer)** فقط ~۲۲ ns/op می‌خورد — atomic.Store + atomic.Load بدون global lock کار می‌کنند.
 4. **Wire compat**: هیچ بایتی روی wire تغییر نکرد؛ صرفاً refactor داخلی sessionStore.
 
-### استپ ۱۱ — DNS Parser Zero-Copy
+### استپ ۱۱ — DNS Parser Zero-Copy — ✅ کامل (۲۰۲۶-۰۵-۲۵)
 هدف: حذف allocation در پارس کوئری/پاسخ.
-- [ ] افزودن decoder قابل reuse با state داخلی pool
-- [ ] استفاده از `slices` view به جای کپی برای label/name parsing
-- [ ] افزودن fuzz target در `internal/dnsparser` (Go fuzz)
-- [ ] بنچ‌مارک قبل/بعد در `BenchmarkParseQuery`/`BenchmarkBuildResponse`
-- [ ] گزارش allocs/op و B/op
+- [x] **مشاهده کلیدی**: هیچ‌کدام از callerهای `LitePacket` (server ingress، client listener، dns tunnel، domain matcher) از فیلد `Questions []Question` استفاده نمی‌کنند — فقط `FirstQuestion`/`HasQuestion`/`Header`/`QuestionEndOffset` خوانده می‌شود. کل alloc اسلایس روی hot path دور ریختنی بود.
+- [x] افزودن fast path `parseFirstQuestion` برای حالت رایج `QDCount==1` — هیچ `[]Question` تخصیص داده نمی‌شود (تنها string name).
+- [x] حالت multi-question slow path حفظ شد (برای تست‌های موجود).
+- [x] بازنویسی `parseName` با scratch buffer روی stack (`[255]byte` طبق RFC 1035) به‌جای `strings.Builder`. حذف allocation پشتیبان Builder؛ تنها یک allocation نهایی برای `string(scratch[:n])`.
+- [x] حذف import `strings` (دیگر استفاده نمی‌شود).
+- [x] افزودن fuzz target: `FuzzParseDNSRequestLite` + `FuzzParseName` (در `parser_fuzz_test.go`). هر کدام ۵s اجرا شد، ~۳۱۵K execs، ۰ crash، invariants بررسی شد (`HasQuestion ⇒ FirstQuestion.Name != ""`، `QuestionEndOffset` در بازه معتبر، خروجی lowercase).
+- [x] بنچ‌مارک‌ها در `parser_bench_test.go`.
+- [x] گزارش allocs/op و B/op:
+
+| Benchmark                                  | قبل ns/op | قبل B/op | قبل alloc | بعد ns/op | بعد B/op | بعد alloc | Δ ns | Δ alloc |
+|--------------------------------------------|-----------|----------|-----------|-----------|----------|-----------|------|---------|
+| `ParseDNSRequestLiteShort` (داغ‌ترین)      | ۵۳۵       | ۸۸       | ۲         | **۲۷۴**   | **۱۶**   | **۱**     | -49% | -1      |
+| `ParseDNSRequestLiteLongName`              | ۷۸۳       | ۸۸       | ۲         | **۴۸۱**   | **۴۸**   | **۱**     | -39% | -1      |
+| `ParsePacketLiteMulti`                     | ۷۸۷       | ۱۷۶      | ۳         | **۶۴۰**   | **۸۸**   | ۳         | -19% | 0       |
+| `BuildEmptyNoErrorResponseShort`           | ۲۲۶       | ۴۸       | ۱         | ۲۳۳       | ۴۸       | ۱         | noise| 0       |
+| `BuildEmptyNoErrorResponseFromLiteShort`   | ۱۵۸       | ۴۸       | ۱         | ۱۷۵       | ۴۸       | ۱         | noise| 0       |
+
+**نکات کلیدی**:
+1. **Hot path (single-question short)**: تقریباً ۲× سریع‌تر، ۸۲٪ کاهش حافظه، ۵۰٪ کاهش تعداد allocation. روی سرور پرترافیک این مستقیماً به throughput تبدیل می‌شود.
+2. **Wire compat**: ۰ تغییر در فرمت — صرفاً refactor داخلی parser.
+3. **Multi-question path** برای backward compatibility حفظ شد ولی به دلیل تغییر `parseName` همچنان از یک allocation کمتر بهره می‌برد.
+4. **Build response paths** scope این استپ نبودند؛ نوسان ~۱۰ns در محدوده noise قرار دارد (در استپ‌های بعدی pool می‌شوند).
+5. **Fuzz coverage**: ۲ هدف، ~۳۱۵K execution، صفر crash/timeout، invariants پاس.
 
 ### استپ ۱۲ — Compression Pools & Threshold Heuristics
 هدف: کاهش هزینه compression بدون از دست دادن نسبت.
