@@ -317,6 +317,15 @@ MIN_ALLOWED_CLIENT_COMPRESSION_MIN_SIZE = 120
 # Stored later as a scaled integer on wire. Allowed range here is 0.05..1.00.
 MIN_ALLOWED_CLIENT_ARQ_INITIAL_RTO_SECONDS = 0.05
 
+# Server-side entropy-skip threshold for the download compressor (deci-bits per
+# byte, 0..80). Same semantics as the client-side knob:
+#   0  = disabled (legacy behaviour)
+#   65 = aggressive (skip anything that looks like 6.5+ bits/byte)
+#   76 = conservative
+#   80 = upper clamp
+# Wire-compatible — affects only how server-emitted payloads are encoded.
+COMPRESSION_ENTROPY_SKIP_DECIBITS = 0
+
 # ------------------------------------------------------------------------------
 # 9) Logging
 # What this section does:

@@ -109,6 +109,11 @@ type ServerConfig struct {
 	ClientMaxARQWindowSize            int      `toml:"MAX_ALLOWED_CLIENT_ARQ_WINDOW_SIZE"`
 	ClientMaxARQDataNackMaxGap        int      `toml:"MAX_ALLOWED_CLIENT_ARQ_DATA_NACK_MAX_GAP"`
 	ClientMinCompressionMinSize       int      `toml:"MIN_ALLOWED_CLIENT_COMPRESSION_MIN_SIZE"`
+	// Step 12 — server-side entropy skip threshold. Same semantics as the
+	// client-side knob: 0 disables; >0 (deci-bits/byte) tells the compressor
+	// to skip the encoder when the sampled payload entropy exceeds the
+	// threshold. Local-only — wire format is unchanged.
+	CompressionEntropySkipDeciBits    int      `toml:"COMPRESSION_ENTROPY_SKIP_DECIBITS"`
 	ClientMinARQInitialRTOSeconds     float64  `toml:"MIN_ALLOWED_CLIENT_ARQ_INITIAL_RTO_SECONDS"`
 }
 
@@ -199,6 +204,7 @@ func defaultServerConfig() ServerConfig {
 		ClientMaxARQWindowSize:            8000,
 		ClientMaxARQDataNackMaxGap:        255,
 		ClientMinCompressionMinSize:       120,
+		CompressionEntropySkipDeciBits:    0,
 		ClientMinARQInitialRTOSeconds:     0.05,
 	}
 }
@@ -481,6 +487,16 @@ func finalizeServerConfig(cfg ServerConfig) (ServerConfig, error) {
 	cfg.ClientMaxARQDataNackMaxGap = clampInt(defaultIntBelow(cfg.ClientMaxARQDataNackMaxGap, 0, defaultServerConfig().ClientMaxARQDataNackMaxGap), 0, min(255, int(^uint8(0))))
 	cfg.ClientMinCompressionMinSize = clampInt(defaultIntBelow(cfg.ClientMinCompressionMinSize, 1, defaultServerConfig().ClientMinCompressionMinSize), 1, int(^uint16(0)))
 	cfg.ClientMinARQInitialRTOSeconds = clampFloat(defaultFloatAtMostZero(cfg.ClientMinARQInitialRTOSeconds, defaultServerConfig().ClientMinARQInitialRTOSeconds), 0.05, 1.0)
+
+	// Step 12 — clamp and install the entropy threshold globally so server-side
+	// encoders (download path) honour it. Wire format unchanged.
+	if cfg.CompressionEntropySkipDeciBits < 0 {
+		cfg.CompressionEntropySkipDeciBits = 0
+	}
+	if cfg.CompressionEntropySkipDeciBits > int(compression.EntropyMaxDeciBits) {
+		cfg.CompressionEntropySkipDeciBits = int(compression.EntropyMaxDeciBits)
+	}
+	compression.SetEntropySkipThresholdDeci(int32(cfg.CompressionEntropySkipDeciBits))
 
 	return cfg, nil
 }

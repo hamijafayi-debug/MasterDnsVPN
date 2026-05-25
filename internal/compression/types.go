@@ -24,6 +24,37 @@ const (
 	maxDecompressedSize = 10 * 1024 * 1024 // 10 MB
 )
 
+// EntropySkipThresholdDeci is a package-level configurable threshold used by
+// CompressPayload to short-circuit encoding when the sampled entropy of the
+// payload exceeds it (in deci-bits per byte, range 1..EntropyMaxDeciBits).
+//
+// The default (0) keeps the legacy behaviour: every eligible payload is
+// handed to the encoder. Callers wire this from a config knob (e.g.
+// COMPRESSION_ENTROPY_SKIP_DECIBITS) — values around 76..78 are typical.
+//
+// We use a package-global rather than an extra function parameter to keep the
+// existing CompressPayload signature wire-stable for the dozens of test sites
+// and to avoid a refactor pass across vpnproto/. Concurrency: writes happen
+// once at startup (config load) before any compression call; reads on hot
+// paths are unsynchronised by design (a transient mixed value is harmless —
+// at worst it nudges a single packet's encoding decision).
+var EntropySkipThresholdDeci int32 = 0
+
+// SetEntropySkipThresholdDeci installs the package-level entropy threshold.
+// thresholdDeci is clamped to [0, EntropyMaxDeciBits]. Passing 0 disables the
+// heuristic (legacy behaviour). Safe to call at any time from config-reload
+// code paths; not safe under concurrent compression calls during the swap,
+// but the worst case is the next-packet boundary picks the new value.
+func SetEntropySkipThresholdDeci(thresholdDeci int32) {
+	if thresholdDeci < 0 {
+		thresholdDeci = 0
+	}
+	if thresholdDeci > EntropyMaxDeciBits {
+		thresholdDeci = EntropyMaxDeciBits
+	}
+	EntropySkipThresholdDeci = thresholdDeci
+}
+
 var ErrDecompressedTooLarge = errors.New("decompressed payload exceeds safety limit")
 
 const availableTypeMask uint8 = (1 << TypeOff) | (1 << TypeZSTD) | (1 << TypeLZ4) | (1 << TypeZLIB)
@@ -138,6 +169,14 @@ func CompressPayload(data []byte, compType uint8, minSize int) ([]byte, uint8) {
 		minSize = DefaultMinSize
 	}
 	if len(data) <= minSize {
+		return data, TypeOff
+	}
+
+	// Step 12: skip encoder when the payload looks already-compressed /
+	// already-encrypted (high entropy). The decision is a heuristic; the legacy
+	// "compressed >= original" guard further down would also catch this case but
+	// pays the full encoder cost first.
+	if EntropySkipThresholdDeci > 0 && LooksHighEntropy(data, EntropySkipThresholdDeci) {
 		return data, TypeOff
 	}
 
@@ -269,13 +308,20 @@ func decompressZSTD(data []byte) ([]byte, error) {
 func compressLZ4(data []byte) ([]byte, error) {
 	// Calculate max possible compressed size
 	maxSize := lz4.CompressBlockBound(len(data))
-	// We need 4 bytes for the original size header (Python's store_size=True)
-	buf := make([]byte, maxSize+4)
+	needed := maxSize + 4
+
+	// Step 12: pull the scratch buffer from a sized pool. The bound is usually
+	// 5-10% larger than the input; for a 1200-byte payload the previous
+	// `make([]byte, maxSize+4)` cost ~1.3 KiB of heap per call. With the pool
+	// we recycle the buffer and copy out only the actually-used prefix.
+	bufPtr, pool := getLZ4Buf(needed)
+	scratch := (*bufPtr)[:needed]
+	defer putLZ4Buf(bufPtr, pool)
 
 	// Store 4-byte little-endian size first (matches Python lz4.block behavior)
-	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(data)))
+	binary.LittleEndian.PutUint32(scratch[0:4], uint32(len(data)))
 
-	n, err := lz4.CompressBlock(data, buf[4:], nil)
+	n, err := lz4.CompressBlock(data, scratch[4:], nil)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +329,11 @@ func compressLZ4(data []byte) ([]byte, error) {
 		return nil, io.ErrShortBuffer
 	}
 
-	return buf[:n+4], nil
+	// Copy out the encoded prefix into a fresh slice — the pooled scratch goes
+	// back to the pool, so we must not return a sub-slice that aliases it.
+	out := make([]byte, n+4)
+	copy(out, scratch[:n+4])
+	return out, nil
 }
 
 func decompressLZ4(data []byte) ([]byte, error) {
