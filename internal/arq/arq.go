@@ -365,6 +365,37 @@ func (a *ARQ) IsClosed() bool {
 	return a.closed
 }
 
+// WaitForShutdown blocks until every goroutine started by Start()
+// (retransmitLoop, writeLoop, ioLoop, dispatcher, …) has returned, or
+// until the supplied timeout elapses. Callers MUST have first invoked
+// Close so the internal context is cancelled — otherwise this will
+// always hit the timeout. Returns true when all goroutines exited
+// cleanly, false on timeout.
+//
+// IMPORTANT: never call this from inside one of those goroutines (it
+// would deadlock). It exists primarily for test teardown, where a
+// caller wants to be certain that no leftover ARQ goroutine writes
+// into reused memory after the test body has returned.
+func (a *ARQ) WaitForShutdown(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		a.wg.Wait()
+		close(done)
+	}()
+	if timeout <= 0 {
+		<-done
+		return true
+	}
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		return false
+	}
+}
+
 func (a *ARQ) State() StreamState {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -3235,17 +3266,24 @@ func (a *ARQ) finalizeClose(reason string) {
 // - SendCloseWrite: local write side ended; peer should stop sending to us
 // - SendRST: reset close, optionally after drain
 func (a *ARQ) Close(reason string, opts CloseOptions) {
+	// Read+write of isVirtual must happen under the same lock to avoid
+	// a data race with concurrent Close callers (e.g. ioLoop's internal
+	// terminal-drain Close racing an external Close from CloseAllStreams).
+	// All other read sites already take a.mu, but this entry point used
+	// to do a bare read before re-acquiring the lock for the write.
+	a.mu.Lock()
 	if a.isVirtual && !opts.Force {
+		a.mu.Unlock()
 		return
 	}
 
 	if opts.Force || (!opts.SendRST && !opts.SendCloseRead && !opts.SendCloseWrite) {
-		a.mu.Lock()
 		a.isVirtual = false
 		a.mu.Unlock()
 		a.finalizeClose(reason)
 		return
 	}
+	a.mu.Unlock()
 
 	if opts.SendCloseRead {
 		if opts.AfterDrain {

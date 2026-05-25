@@ -44,25 +44,25 @@ func buildTCPTestClient(t *testing.T) *Client {
 			}
 			c.streamsMu.Unlock()
 
-			// Give any in-flight ioLoop/deferTerminalPacket goroutines a
-			// brief moment to settle their own Close() call before we
-			// race them with a Cleanup-driven Close(). This works around
-			// a known production-code race in ARQ.Close()'s isVirtual
-			// read/write pair (logged in PLAN.md under bugs for a
-			// dedicated fix step). 20ms is plenty for the in-process
-			// Close finalisation to complete on a loopback test.
-			if len(streams) > 0 {
-				time.Sleep(20 * time.Millisecond)
-			}
-
+			// Step 7: replaced the 20ms settling sleep with a
+			// deterministic WaitForShutdown call. ARQ.Close cancels the
+			// internal context but does NOT join the retransmit /
+			// write-loop goroutines before returning, so without an
+			// explicit wait those goroutines can still write into the
+			// stream's state after the test body returns and race
+			// detector flags them against the next test's reads.
+			// 2 seconds is a comfortable ceiling: in practice clean
+			// shutdown takes <5ms on loopback.
 			for _, s := range streams {
 				if s == nil {
 					continue
 				}
-				if !s.TerminalSince().IsZero() {
-					continue // already closed by the test body
+				if s.TerminalSince().IsZero() {
+					s.Close()
 				}
-				s.Close()
+				if a, ok := s.Stream.(*arq.ARQ); ok && a != nil {
+					_ = a.WaitForShutdown(2 * time.Second)
+				}
 			}
 		})
 	}

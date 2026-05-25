@@ -2907,6 +2907,96 @@ func TestARQ_OutOfOrderDuplicateUnderLoss(t *testing.T) {
 	}
 }
 
+// TestARQ_CloseConcurrentSafe stresses ARQ.Close from many goroutines at
+// once, with a mix of Force and non-Force options. Before Step 7 this
+// would trip the race detector because Close used to read a.isVirtual
+// outside the critical section that wrote it. After Step 7 the read and
+// write share the same a.mu acquisition, so this loop must be race-free
+// regardless of caller arrival order.
+func TestARQ_CloseConcurrentSafe(t *testing.T) {
+	for iter := 0; iter < 50; iter++ {
+		enqueuer := NewMockPacketEnqueuer()
+		conn := newAggregateWriteConn()
+		a := NewARQ(uint16(iter), 1, enqueuer, conn, 1200, nil, Config{
+			WindowSize: 64,
+			RTO:        0.1,
+			MaxRTO:     0.5,
+		})
+		a.Start()
+
+		var wg sync.WaitGroup
+		const callers = 8
+		start := make(chan struct{})
+		for i := 0; i < callers; i++ {
+			wg.Add(1)
+			i := i
+			go func() {
+				defer wg.Done()
+				<-start
+				switch i % 4 {
+				case 0:
+					a.Close("concurrent force", CloseOptions{Force: true})
+				case 1:
+					a.Close("concurrent default", CloseOptions{})
+				case 2:
+					a.Close("concurrent rst", CloseOptions{SendRST: true})
+				case 3:
+					a.Close("concurrent close-read", CloseOptions{SendCloseRead: true})
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		if !a.IsClosed() {
+			t.Fatalf("iter %d: expected ARQ to be closed after concurrent Close fan-in", iter)
+		}
+	}
+}
+
+// TestARQ_CloseVirtualConcurrentSafe stresses concurrent Close calls on a
+// virtual ARQ instance (the path that explicitly reads a.isVirtual in the
+// Step 6 race report). Half the callers use Force=false (which should be
+// swallowed by the isVirtual check) and half use Force=true (which must
+// flip isVirtual=false and finalise). Race detector must see zero
+// warnings.
+func TestARQ_CloseVirtualConcurrentSafe(t *testing.T) {
+	for iter := 0; iter < 50; iter++ {
+		enqueuer := NewMockPacketEnqueuer()
+		conn := newAggregateWriteConn()
+		a := NewARQ(uint16(iter), 2, enqueuer, conn, 1200, nil, Config{
+			WindowSize: 64,
+			RTO:        0.1,
+			MaxRTO:     0.5,
+			IsVirtual:  true,
+		})
+		a.Start()
+
+		var wg sync.WaitGroup
+		const callers = 8
+		start := make(chan struct{})
+		for i := 0; i < callers; i++ {
+			wg.Add(1)
+			i := i
+			go func() {
+				defer wg.Done()
+				<-start
+				if i%2 == 0 {
+					a.Close("virtual no-force", CloseOptions{})
+				} else {
+					a.Close("virtual force", CloseOptions{Force: true})
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		if !a.IsClosed() {
+			t.Fatalf("iter %d: expected virtual ARQ to be closed after force fan-in", iter)
+		}
+	}
+}
+
 func firstDiff(a, b []byte) int {
 	n := len(a)
 	if len(b) < n {
