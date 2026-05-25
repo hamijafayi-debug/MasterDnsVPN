@@ -40,10 +40,12 @@ func leakDetectorSkipUnderCount() bool {
 			return b
 		}
 	}
-	// Heuristic: if there are already ARQ retransmitLoop goroutines alive
-	// before our test starts, we're in a -count > 1 run (a sibling test
-	// leaked one). Sample the live stacks and look for the signature.
-	return countARQRetransmitLoopsAlive() > 0
+	// Step 19.5 (ARQ-LIFECYCLE-1 fix): newTestSessionRecord(t, ...) now
+	// registers a t.Cleanup hook that walks the record's Streams map
+	// and force-closes + joins every ARQ instance. Previously this
+	// helper had to probe runtime.Stack to decide whether to skip; the
+	// fixture leak is gone, so the detector runs unconditionally.
+	return false
 }
 
 // countARQRetransmitLoopsAlive samples runtime.Stack and returns the

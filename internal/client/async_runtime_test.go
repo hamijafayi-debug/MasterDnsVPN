@@ -300,6 +300,15 @@ func TestAsyncStreamCleanupWorker(t *testing.T) {
 		RTO:        1.0,
 		MaxRTO:     8.0,
 	})
+	// Step 19.5 lifecycle: ensure the ARQ instance is force-closed and
+	// joined when the test exits. Without Start() the retransmit/rx
+	// loops never run, but the ctx still lives — registering the
+	// teardown is cheap and keeps every test ARQ on a uniform contract,
+	// so the package-wide leak detector can run unconditionally.
+	t.Cleanup(func() {
+		a.Close("test cleanup", arq.CloseOptions{Force: true})
+		_ = a.WaitForShutdown(2 * time.Second)
+	})
 	stream.Stream = a
 	c.active_streams[1] = stream
 	c.streamsMu.Unlock()

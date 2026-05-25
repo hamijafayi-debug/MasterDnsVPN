@@ -32,7 +32,23 @@ func (t *testReadWriteCloser) Close() error {
 	return nil
 }
 
-func newTestSessionRecord(sessionID uint8) *sessionRecord {
+// newTestSessionRecord constructs a sessionRecord pre-seeded with a virtual
+// stream0 (matching production wiring) and — when t is non-nil — registers
+// a t.Cleanup hook that force-closes every ARQ instance still attached to
+// the record at test-end and joins their goroutines.
+//
+// Step 19.5 (ARQ-LIFECYCLE-1 fix): before this refactor, the helper did
+// not have a hook into the test lifecycle, so the ARQ.retransmitLoop
+// goroutine spawned by ensureStream0 → NewStreamServer → ARQ.Start
+// survived across iterations of `go test -count`. That polluted the
+// Step 19 leak-detector snapshot and forced us to skip the detector
+// when a sibling test had leaked. Now every ARQ created via this
+// fixture is guaranteed to exit before the next test starts.
+//
+// Tests that explicitly call cleanupClosedSession / Close still work:
+// the cleanup hook is idempotent (ARQ.Close is a no-op on already-closed
+// instances, WaitForShutdown returns immediately).
+func newTestSessionRecord(tb testing.TB, sessionID uint8) *sessionRecord {
 	r := &sessionRecord{
 		ID:               sessionID,
 		DownloadMTU:      512,
@@ -43,7 +59,40 @@ func newTestSessionRecord(sessionID uint8) *sessionRecord {
 		OrphanQueue:      mlq.New[VpnProto.Packet](8),
 	}
 	r.ensureStream0(nil)
+	if tb != nil {
+		registerSessionRecordCleanup(tb, r)
+	}
 	return r
+}
+
+// registerSessionRecordCleanup walks the record's stream map at test-end
+// and force-closes every ARQ instance, then waits for the worker
+// goroutines to exit. Safe to call on records that are already closed —
+// the per-stream guards make every step idempotent.
+func registerSessionRecordCleanup(tb testing.TB, r *sessionRecord) {
+	if tb == nil || r == nil {
+		return
+	}
+	tb.Cleanup(func() {
+		r.StreamsMu.RLock()
+		streams := make([]*Stream_server, 0, len(r.Streams))
+		for _, s := range r.Streams {
+			streams = append(streams, s)
+		}
+		r.StreamsMu.RUnlock()
+		for _, s := range streams {
+			if s == nil || s.ARQ == nil {
+				continue
+			}
+			if !s.ARQ.IsClosed() {
+				s.ARQ.Close("test cleanup (Step 19.5)", arq.CloseOptions{Force: true})
+			}
+			// 2s is generous — production close paths join in <5ms.
+			if !s.ARQ.WaitForShutdown(2 * time.Second) {
+				tb.Logf("WARNING [Step 19.5 fixture cleanup]: stream sessionID=%d streamID=%d ARQ did not shut down within 2s", r.ID, s.ID)
+			}
+		}
+	})
 }
 
 func newTestServerForCleanup() *Server {
@@ -68,7 +117,7 @@ func newTestServerForDeferredCleanup() *Server {
 
 func TestCleanupClosedSessionClosesStreamsAndClearsQueues(t *testing.T) {
 	s := newTestServerForCleanup()
-	record := newTestSessionRecord(7)
+	record := newTestSessionRecord(t, 7)
 	record.streamCleanup = s.cleanupStreamArtifacts
 
 	upstream := &testReadWriteCloser{}
@@ -152,7 +201,7 @@ func TestCleanupClosedSessionClosesStreamsAndClearsQueues(t *testing.T) {
 }
 
 func TestFinalizeAfterARQCloseClearsTXQueue(t *testing.T) {
-	record := newTestSessionRecord(44)
+	record := newTestSessionRecord(t, 44)
 	cfg := arq.Config{WindowSize: 32, RTO: 1.0, MaxRTO: 5.0}
 	stream := record.getOrCreateStream(5, cfg, nil, nil)
 	if stream == nil {
@@ -179,7 +228,7 @@ func TestFinalizeAfterARQCloseClearsTXQueue(t *testing.T) {
 }
 
 func TestForceCloseStreamQueuesRSTOnServer(t *testing.T) {
-	record := newTestSessionRecord(21)
+	record := newTestSessionRecord(t, 21)
 	stream := record.getOrCreateStream(1, arq.Config{}, nil, nil)
 	upstream := &testReadWriteCloser{}
 	stream.UpstreamConn = upstream
@@ -203,7 +252,7 @@ func TestForceCloseStreamQueuesRSTOnServer(t *testing.T) {
 }
 
 func TestGracefulCloseStreamQueuesCloseReadOnServer(t *testing.T) {
-	record := newTestSessionRecord(22)
+	record := newTestSessionRecord(t, 22)
 	stream := record.getOrCreateStream(1, arq.Config{}, nil, nil)
 
 	stream.CloseStream(false, 0, "graceful close")
@@ -221,7 +270,7 @@ func TestGracefulCloseStreamQueuesCloseReadOnServer(t *testing.T) {
 
 func TestSessionStoreCleanupReturnsExpiredRecordForFollowupCleanup(t *testing.T) {
 	store := newSessionStore(8, 32)
-	record := newTestSessionRecord(9)
+	record := newTestSessionRecord(t, 9)
 	record.Signature[0] = 1
 	record.Cookie = 99
 	record.ResponseMode = 1
@@ -255,7 +304,7 @@ func TestSessionStoreCleanupReturnsExpiredRecordForFollowupCleanup(t *testing.T)
 
 func TestSessionStoreCleanupKeepsActiveRecordOpen(t *testing.T) {
 	store := newSessionStore(8, 32)
-	record := newTestSessionRecord(10)
+	record := newTestSessionRecord(t, 10)
 	record.Signature[0] = 2
 	record.Cookie = 88
 	record.ResponseMode = 1
@@ -279,7 +328,7 @@ func TestSessionStoreCleanupKeepsActiveRecordOpen(t *testing.T) {
 
 func TestCollectIdleDeferredSessionsMarksIdleActiveSessionOncePerActivityWindow(t *testing.T) {
 	store := newSessionStore(8, 32)
-	record := newTestSessionRecord(31)
+	record := newTestSessionRecord(t, 31)
 	staleActivity := time.Now().Add(-time.Minute)
 	record.setLastActivity(staleActivity)
 	store.byID[record.ID].Store(record)
@@ -306,7 +355,7 @@ func TestDequeueSessionResponseScansActiveStreams(t *testing.T) {
 		sessions: newSessionStore(8, 32),
 	}
 
-	record := newTestSessionRecord(43)
+	record := newTestSessionRecord(t, 43)
 	stream := record.getOrCreateStream(1, arq.Config{}, nil, nil)
 	if stream == nil {
 		t.Fatal("expected stream to be created")
@@ -328,7 +377,7 @@ func TestDequeueSessionResponseScansActiveStreams(t *testing.T) {
 
 func TestCleanupIdleDeferredSessionClearsDeferredStateWithoutClosingSession(t *testing.T) {
 	s := newTestServerForDeferredCleanup()
-	record := newTestSessionRecord(32)
+	record := newTestSessionRecord(t, 32)
 	record.Cookie = 7
 	record.setLastActivity(time.Now().Add(-time.Minute))
 	s.sessions = newSessionStore(8, 32)
@@ -400,7 +449,7 @@ func TestCleanupIdleDeferredSessionClearsDeferredStateWithoutClosingSession(t *t
 }
 
 func TestCleanupTerminalStreamsAbortsAndRemovesExpiredStreams(t *testing.T) {
-	record := newTestSessionRecord(11)
+	record := newTestSessionRecord(t, 11)
 
 	upstream := &testReadWriteCloser{}
 	stream := record.getOrCreateStream(2, arq.Config{}, nil, nil)
@@ -431,7 +480,7 @@ func TestDequeueSessionResponseDuplicatesLastPackedControlBlock(t *testing.T) {
 		sessions: newSessionStore(8, 32),
 	}
 
-	record := newTestSessionRecord(12)
+	record := newTestSessionRecord(t, 12)
 	record.MaxPackedBlocks = 2
 	stream := record.getOrCreateStream(1, arq.Config{}, nil, nil)
 	if !stream.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_SYN_ACK), Enums.PACKET_STREAM_SYN_ACK, 11, 0, 0, 0, 0, nil) {
@@ -480,7 +529,7 @@ func TestDequeueSessionResponseDuplicatesLastPackedControlBlock(t *testing.T) {
 }
 
 func TestDeactivateStreamRemovesClosedStreamFromRoundRobinAndClearsQueue(t *testing.T) {
-	record := newTestSessionRecord(13)
+	record := newTestSessionRecord(t, 13)
 	stream := record.getOrCreateStream(9, arq.Config{}, nil, nil)
 	if stream == nil {
 		t.Fatal("expected stream to be created")
@@ -506,7 +555,7 @@ func TestDeactivateStreamRemovesClosedStreamFromRoundRobinAndClearsQueue(t *test
 }
 
 func TestSessionActiveStreamSnapshotUpdatesAfterMutations(t *testing.T) {
-	record := newTestSessionRecord(23)
+	record := newTestSessionRecord(t, 23)
 
 	record.getOrCreateStream(9, arq.Config{}, nil, nil)
 	record.getOrCreateStream(3, arq.Config{}, nil, nil)
@@ -560,7 +609,7 @@ func TestSessionActiveStreamSnapshotUpdatesAfterMutations(t *testing.T) {
 
 func TestHandleStreamRSTRequestPreservesRstAckViaOrphanQueue(t *testing.T) {
 	s := newTestServerForStreamSyn("TCP")
-	record := newTestSessionRecord(14)
+	record := newTestSessionRecord(t, 14)
 	record.Cookie = 7
 	s.sessions.byID[record.ID].Store(record)
 
@@ -614,7 +663,7 @@ func TestHandleStreamRSTRequestPreservesRstAckViaOrphanQueue(t *testing.T) {
 
 func TestRecentlyClosedGracefulStreamSuppressesMissingStreamReset(t *testing.T) {
 	s := newTestServerForStreamSyn("TCP")
-	record := newTestSessionRecord(16)
+	record := newTestSessionRecord(t, 16)
 	record.Cookie = 9
 	s.sessions.byID[record.ID].Store(record)
 
@@ -647,7 +696,7 @@ func TestRecentlyClosedGracefulStreamSuppressesMissingStreamReset(t *testing.T) 
 
 func TestRecentlyClosedGracefulStreamStillAcksLateCloseWrite(t *testing.T) {
 	s := newTestServerForStreamSyn("TCP")
-	record := newTestSessionRecord(24)
+	record := newTestSessionRecord(t, 24)
 	record.Cookie = 9
 	s.sessions.byID[record.ID].Store(record)
 
@@ -681,7 +730,7 @@ func TestRecentlyClosedGracefulStreamStillAcksLateCloseWrite(t *testing.T) {
 
 func TestRecentlyClosedGracefulStreamLateDataQueuesRST(t *testing.T) {
 	s := newTestServerForStreamSyn("TCP")
-	record := newTestSessionRecord(25)
+	record := newTestSessionRecord(t, 25)
 	record.Cookie = 9
 	s.sessions.byID[record.ID].Store(record)
 
@@ -718,7 +767,7 @@ func TestRecentlyClosedGracefulStreamLateDataQueuesRST(t *testing.T) {
 
 func TestRecentlyClosedNonSuppressedStreamStillQueuesMissingStreamReset(t *testing.T) {
 	s := newTestServerForStreamSyn("TCP")
-	record := newTestSessionRecord(17)
+	record := newTestSessionRecord(t, 17)
 	record.Cookie = 9
 	s.sessions.byID[record.ID].Store(record)
 	record.noteStreamClosed(14, time.Now(), false)
@@ -740,7 +789,7 @@ func TestRecentlyClosedNonSuppressedStreamStillQueuesMissingStreamReset(t *testi
 }
 
 func TestReusedStreamIDClearsRecentlyClosedTombstone(t *testing.T) {
-	record := newTestSessionRecord(18)
+	record := newTestSessionRecord(t, 18)
 	record.noteStreamClosed(21, time.Now(), true)
 
 	stream := record.getOrCreateStream(21, arq.Config{}, nil, nil)
@@ -754,7 +803,7 @@ func TestReusedStreamIDClearsRecentlyClosedTombstone(t *testing.T) {
 
 func TestSweepRecentlyClosedStreamsPrunesExpiredEntries(t *testing.T) {
 	sessions := newSessionStore(8, 32)
-	record := newTestSessionRecord(23)
+	record := newTestSessionRecord(t, 23)
 	record.RecentlyClosedTTL = 10 * time.Minute
 	record.noteStreamClosed(5, time.Now().Add(-11*time.Minute), false)
 	record.noteStreamClosed(6, time.Now().Add(-2*time.Minute), false)
@@ -772,7 +821,7 @@ func TestSweepRecentlyClosedStreamsPrunesExpiredEntries(t *testing.T) {
 
 func TestPreprocessInboundPacketDoesNotQueueImmediateDataAck(t *testing.T) {
 	s := newTestServerForStreamSyn("TCP")
-	record := newTestSessionRecord(19)
+	record := newTestSessionRecord(t, 19)
 	record.Cookie = 11
 	record.DownloadCompression = 0
 	s.sessions.byID[record.ID].Store(record)
@@ -805,7 +854,7 @@ func TestPreprocessInboundPacketDoesNotQueueImmediateDataAck(t *testing.T) {
 
 func TestOnStreamClosedCleansDeferredAndSOCKSArtifacts(t *testing.T) {
 	s := newTestServerForCleanup()
-	record := newTestSessionRecord(20)
+	record := newTestSessionRecord(t, 20)
 	record.Cookie = 13
 	record.streamCleanup = s.cleanupStreamArtifacts
 
@@ -851,7 +900,7 @@ func TestOnStreamClosedCleansDeferredAndSOCKSArtifacts(t *testing.T) {
 }
 
 func TestClosedSessionRecordRejectsPostCloseStreamAccess(t *testing.T) {
-	record := newTestSessionRecord(15)
+	record := newTestSessionRecord(t, 15)
 	record.ensureStream0(nil)
 	record.markClosed()
 
