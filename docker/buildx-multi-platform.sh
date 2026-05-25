@@ -7,7 +7,7 @@ cd "${SCRIPT_DIR}"
 RELEASE_TAG="${RELEASE_TAG:-latest}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm/v5,linux/arm/v7,linux/arm64/v8,linux/mips64le}"
 REGISTRY_KIND="${REGISTRY_KIND:-ghcr}"
-IMAGE_REFS_CSV="${IMAGE_REFS:-masterking32/masterdnsvpn:latest}"
+IMAGE_REFS_CSV="${IMAGE_REFS:-hamijafayi-debug/masterdnsvpn:latest}"
 RELEASE_SHA256="${RELEASE_SHA256:-}"
 
 if ! docker buildx version >/dev/null 2>&1; then

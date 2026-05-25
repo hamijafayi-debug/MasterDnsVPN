@@ -55,7 +55,7 @@ print_usage() {
 MasterDnsVPN Server Linux Installer
 
 Usage:
-  bash <(curl -Ls https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh) [OPTIONS]
+  bash <(curl -Ls https://raw.githubusercontent.com/hamijafayi-debug/MasterDnsVPN/main/server_linux_install.sh) [OPTIONS]
 
 Options:
   -v, --version <VERSION>   Install a specific MasterDnsVPN release (tag), e.g. v1.2.3.
@@ -67,13 +67,13 @@ Options:
 
 Examples:
   # Install the latest release (default behavior):
-  bash <(curl -Ls https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh)
+  bash <(curl -Ls https://raw.githubusercontent.com/hamijafayi-debug/MasterDnsVPN/main/server_linux_install.sh)
 
   # Install a specific release version:
-  bash <(curl -Ls https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh) --version v2026.04.12.234117-978faee
+  bash <(curl -Ls https://raw.githubusercontent.com/hamijafayi-debug/MasterDnsVPN/main/server_linux_install.sh) --version v2026.04.12.234117-978faee
 
   # Uninstall MasterDnsVPN:
-  bash <(curl -Ls https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh) --uninstall
+  bash <(curl -Ls https://raw.githubusercontent.com/hamijafayi-debug/MasterDnsVPN/main/server_linux_install.sh) --uninstall
 USAGE
 }
 
@@ -88,10 +88,10 @@ select_release_artifact() {
 
   local base_url
   if [[ -n "$version" ]]; then
-    base_url="https://github.com/masterking32/MasterDnsVPN/releases/download/${version}"
+    base_url="https://github.com/hamijafayi-debug/MasterDnsVPN/releases/download/${version}"
     log_info "Targeting MasterDnsVPN release: ${version}"
   else
-    base_url="https://github.com/masterking32/MasterDnsVPN/releases/latest/download"
+    base_url="https://github.com/hamijafayi-debug/MasterDnsVPN/releases/latest/download"
   fi
 
   case "$arch" in

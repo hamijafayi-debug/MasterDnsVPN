@@ -554,7 +554,7 @@ func (c *Client) ShortPrintBanner() {
 	}
 
 	c.log.Infof("============================================================")
-	c.log.Infof("<cyan>GitHub:</cyan> <yellow>https://github.com/masterking32/MasterDnsVPN</yellow>")
+	c.log.Infof("<cyan>GitHub:</cyan> <yellow>https://github.com/hamijafayi-debug/MasterDnsVPN</yellow>")
 	c.log.Infof("<cyan>Telegram:</cyan> <yellow>@MasterDnsVPN</yellow>")
 	c.log.Infof("<cyan>Build Version:</cyan> <yellow>%s</yellow>", version.GetVersion())
 	c.log.Infof("============================================================")

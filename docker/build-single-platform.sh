@@ -6,7 +6,7 @@ cd "${SCRIPT_DIR}"
 
 # ===== Prompt for IMAGE_NAME =====
 if [[ -z "${IMAGE_NAME:-}" ]]; then
-  IMAGE_NAME="masterking32/masterdnsvpn"
+  IMAGE_NAME="hamijafayi-debug/masterdnsvpn"
 fi
 
 if [[ -z "${IMAGE_NAME}" ]]; then

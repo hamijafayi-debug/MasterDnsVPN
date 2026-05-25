@@ -100,7 +100,7 @@ func main() {
 	}
 
 	log.Infof("============================================================")
-	log.Infof("<cyan>GitHub:</cyan> <yellow>https://github.com/masterking32/MasterDnsVPN</yellow>")
+	log.Infof("<cyan>GitHub:</cyan> <yellow>https://github.com/hamijafayi-debug/MasterDnsVPN</yellow>")
 	log.Infof("<cyan>Telegram:</cyan> <yellow>@MasterDnsVPN</yellow>")
 	log.Infof("<cyan>Build Version:</cyan> <yellow>%s</yellow>", version.GetVersion())
 	log.Infof("============================================================")
