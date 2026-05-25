@@ -1,0 +1,235 @@
+name: Bench Regression
+
+# هدف: محافظت از سرعت در PR‌ها. روی هر PR، بنچ‌مارک‌ها را اجرا می‌کند، با baseline مقایسه می‌کند،
+# و در صورت رگرسیون > threshold فیل می‌شود. روی push به main، baseline جدید را ذخیره می‌کند.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  # امکان اجرای دستی
+  workflow_dispatch:
+    inputs:
+      threshold:
+        description: 'Regression threshold percent (ns/op)'
+        required: false
+        default: '20'
+      benchtime:
+        description: 'go test -benchtime value'
+        required: false
+        default: '1s'
+      count:
+        description: 'go test -count value'
+        required: false
+        default: '1'
+
+permissions:
+  contents: write     # برای پوش baseline به branch جدا (push روی main)
+  pull-requests: write # برای کامنت روی PR
+
+jobs:
+  bench:
+    name: Run benchmarks & compare to baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout PR/push code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build benchregress tool
+        run: go build -o /tmp/benchregress ./scripts/benchregress/
+
+      - name: Determine threshold/benchtime/count
+        id: knobs
+        run: |
+          THRESHOLD="${{ github.event.inputs.threshold || '20' }}"
+          BENCHTIME="${{ github.event.inputs.benchtime || '1s' }}"
+          COUNT="${{ github.event.inputs.count || '1' }}"
+          echo "threshold=$THRESHOLD" >> "$GITHUB_OUTPUT"
+          echo "benchtime=$BENCHTIME" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "[knobs] threshold=$THRESHOLD benchtime=$BENCHTIME count=$COUNT"
+
+      - name: Run current benchmarks
+        id: run_current
+        run: |
+          chmod +x scripts/benchregress/run_bench.sh
+          scripts/benchregress/run_bench.sh current.txt "${{ steps.knobs.outputs.benchtime }}" "${{ steps.knobs.outputs.count }}"
+          echo "---- HEAD of current.txt ----"
+          head -50 current.txt || true
+          echo "---- TAIL of current.txt ----"
+          tail -20 current.txt || true
+
+      # روی PR: baseline را از branch جدا (bench-baseline) بارگیری می‌کنیم.
+      # روی push به main: baseline جدید را ذخیره می‌کنیم (در پایان).
+      - name: Fetch baseline from bench-baseline branch
+        id: fetch_baseline
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        run: |
+          if git ls-remote --heads origin bench-baseline | grep -q bench-baseline; then
+            echo "[baseline] branch exists, fetching..."
+            git fetch origin bench-baseline:bench-baseline
+            git show bench-baseline:bench-baseline.txt > baseline.txt 2>/dev/null || {
+              echo "[baseline] bench-baseline.txt not found on branch — first-run case"
+              cp current.txt baseline.txt
+              echo "first_run=true" >> "$GITHUB_OUTPUT"
+            }
+            echo "[baseline] loaded $(wc -l < baseline.txt) lines"
+          else
+            echo "[baseline] bench-baseline branch does not exist — first run, using current as baseline"
+            cp current.txt baseline.txt
+            echo "first_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compare benchmarks
+        id: compare
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        # توجه: ادامه می‌دهیم حتی اگر exit code != 0 باشد تا کامنت روی PR گذاشته شود.
+        # تصمیم نهایی موفقیت/شکست در step بعدی است.
+        continue-on-error: true
+        run: |
+          /tmp/benchregress \
+            -baseline baseline.txt \
+            -current current.txt \
+            -threshold "${{ steps.knobs.outputs.threshold }}" \
+            -markdown bench-report.md \
+            > bench-report-stdout.md 2> bench-report-stderr.log
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          echo "---- stderr ----"
+          cat bench-report-stderr.log
+          echo "---- stdout ----"
+          cat bench-report-stdout.md
+
+      - name: Upload bench artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.run_id }}
+          path: |
+            current.txt
+            baseline.txt
+            bench-report.md
+            bench-report-stderr.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Post PR comment with bench report
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body = '## 📊 Benchmark Regression Report\n\n';
+            try {
+              const report = fs.readFileSync('bench-report.md', 'utf8');
+              body = report;
+            } catch (e) {
+              body += `_Report file missing: ${e.message}_\n`;
+            }
+            body += `\n<sub>Threshold: **${{ steps.knobs.outputs.threshold }}%** · benchtime: \`${{ steps.knobs.outputs.benchtime }}\` · count: \`${{ steps.knobs.outputs.count }}\` · run: [${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})</sub>\n`;
+
+            // پیدا کردن کامنت قبلی این bot و آپدیتش، یا ایجاد جدید
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c =>
+              c.user && c.user.type === 'Bot' &&
+              c.body && c.body.includes('Benchmark Regression Report')
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+              console.log(`Updated comment ${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+              console.log('Created new comment');
+            }
+
+      - name: Fail job if regression detected
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "${{ steps.fetch_baseline.outputs.first_run }}" = "true" ]; then
+            echo "[result] first-run mode — no baseline to compare, passing"
+            exit 0
+          fi
+          EXIT="${{ steps.compare.outputs.exit_code }}"
+          echo "[result] benchregress exit code: $EXIT"
+          if [ "$EXIT" = "1" ]; then
+            echo "::error::Performance regression detected — see report above"
+            exit 1
+          fi
+          if [ "$EXIT" != "0" ]; then
+            echo "::warning::benchregress returned unexpected exit code $EXIT"
+            exit 0
+          fi
+
+  update-baseline:
+    name: Update baseline (push to main only)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: []
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run benchmarks for new baseline
+        run: |
+          chmod +x scripts/benchregress/run_bench.sh
+          scripts/benchregress/run_bench.sh new-baseline.txt 1s 1
+
+      - name: Push to bench-baseline branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # checkout/create orphan branch
+          if git ls-remote --heads origin bench-baseline | grep -q bench-baseline; then
+            git fetch origin bench-baseline
+            git checkout bench-baseline
+          else
+            git checkout --orphan bench-baseline
+            git rm -rf . || true
+          fi
+
+          cp new-baseline.txt bench-baseline.txt
+          echo "# Auto-generated by .github/workflows/bench.yml on push to main" > README.md
+          echo "" >> README.md
+          echo "Latest baseline commit: ${{ github.sha }}" >> README.md
+          echo "Updated at: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> README.md
+
+          git add bench-baseline.txt README.md
+          if git diff --staged --quiet; then
+            echo "[baseline] no changes to commit"
+            exit 0
+          fi
+          git commit -m "bench: update baseline from ${{ github.sha }}"
+          git push origin bench-baseline

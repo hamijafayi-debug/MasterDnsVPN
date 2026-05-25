@@ -1098,6 +1098,55 @@ sequenceDiagram
 
 ---
 
+## 🧪 Benchmarks & Regression Guard (CI)
+
+The repository ships with an automated **performance-regression guard** that protects every pull request from accidentally slowing down a hot path.
+
+### Installation (one-time, requires `workflow` scope)
+The workflow YAML is shipped as a template at `scripts/benchregress/bench.yml.template`. To activate it, copy it into `.github/workflows/bench.yml` and commit using a PAT or account that has the `workflow` permission scope:
+```bash
+mkdir -p .github/workflows
+cp scripts/benchregress/bench.yml.template .github/workflows/bench.yml
+git add .github/workflows/bench.yml
+git commit -m "ci: enable bench regression workflow"
+git push
+```
+This separation exists because some GitHub App tokens cannot create workflow files.
+
+### Workflow (after installation)
+- **File:** `.github/workflows/bench.yml` (copied from template)
+- **Triggers:**
+  - `pull_request` → runs benchmarks on the PR's HEAD, compares them to the latest baseline, and posts a markdown report as a PR comment. The job fails if any benchmark gets slower than the threshold.
+  - `push` to `main` → after a merge, regenerates the baseline and pushes it to an orphan `bench-baseline` branch.
+  - `workflow_dispatch` → manual trigger with adjustable `threshold`, `benchtime`, `count`.
+- **Default threshold:** **20%** for ns/op (chosen to absorb CI runner noise — local benchmarks should target ≤10% drift).
+
+### Components
+- `scripts/benchregress/run_bench.sh` — runs `go test -bench` on 11 hot packages (`arq`, `basecodec`, `client`, `compression`, `dnscache`, `dnsparser`, `logger`, `security`, `streamutil`, `udpserver`, `vpnproto`) and appends to a single output file.
+- `scripts/benchregress/main.go` — zero-dependency Go tool that parses two bench-output files, computes Δ% on `ns/op`, renders a markdown table, and exits `1` on any regression above `-threshold`.
+
+### Local Usage
+
+Run the bench suite locally and compare to a previously saved baseline:
+```bash
+# Snapshot current baseline (run once on a clean tree)
+./scripts/benchregress/run_bench.sh baseline.txt 1s 1
+
+# After making changes, run again and compare
+./scripts/benchregress/run_bench.sh current.txt 1s 1
+go run ./scripts/benchregress -baseline baseline.txt -current current.txt -threshold 10 -markdown report.md
+
+cat report.md
+```
+
+The exit code is `1` if any benchmark in `current.txt` is slower by more than `-threshold` percent vs `baseline.txt` (ns/op).
+
+### Storage Strategy
+
+The historical baseline is stored on an orphan branch named `bench-baseline` (auto-managed). This keeps the main branch history clean while still allowing PRs to fetch the most recent baseline. The branch is updated only on push to `main`, so feature PRs always compare against the last-merged state.
+
+---
+
 ## 🤝 Contributing
 
 We welcome all contributions. If you have an idea, bug report, or performance improvement, please open an Issue or Pull Request.
