@@ -21,6 +21,7 @@ import (
 
 	"masterdnsvpn-go/internal/client"
 	"masterdnsvpn-go/internal/config"
+	"masterdnsvpn-go/internal/metrics"
 	"masterdnsvpn-go/internal/runtimepath"
 	"masterdnsvpn-go/internal/version"
 )
@@ -246,6 +247,20 @@ func main() {
 		log.Infof("\U0001F680 <green>MasterDnsVPN Client Started</green>")
 		log.Infof("\U0001F4C4 <green>Configuration loaded from: <cyan>%s</cyan></green>", resolvedConfigPath)
 		log.Infof("\U0001F5C2  <green>Connection Catalog: <cyan>%d</cyan> domain-resolver pairs</green>", app.Balancer().TotalCount())
+	}
+
+	// Optional pprof/metrics endpoint. Controlled by the PPROF_ADDR env
+	// variable (empty ⇒ disabled). Same contract as the server side.
+	if pprofShutdown, perr := metrics.StartPprof(os.Getenv("PPROF_ADDR"), func(line string) {
+		if log != nil {
+			log.Infof("\U0001F50E <cyan>%s</cyan>", line)
+		}
+	}); perr != nil {
+		if log != nil {
+			log.Warnf("pprof endpoint failed to start: %v", perr)
+		}
+	} else {
+		defer pprofShutdown()
 	}
 
 	// Wait for termination signal

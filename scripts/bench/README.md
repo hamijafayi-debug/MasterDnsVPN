@@ -70,3 +70,45 @@ go run scripts/bench/bench.go -mode send -addr 127.0.0.1:9090 -json
 1. **First-Byte Start**: The timer starts on the first successful `Read` or `Write` of the payload.
 2. **ACK Synchronization**: For "Exfil" scenarios, the sink sends an "OK" acknowledgment to ensure all data has cleared the tunnel before the timer stops.
 3. **Monotonic Timing**: Uses Go's monotonic clock for sub-millisecond precision.
+
+---
+
+## Make targets (Step 1)
+
+The repository root ships a small `Makefile` so the harness can be exercised
+without remembering the long `go run` invocations. The relevant recipes are:
+
+| Target            | What it does                                                   |
+| ----------------- | -------------------------------------------------------------- |
+| `make bench`      | Runs the harness against lossless localhost (10 MiB × 3 runs). |
+| `make bench-loss` | Prints the `tc qdisc netem` recipe for lossy-link simulation.  |
+| `make pprof-client` | Starts the client with `PPROF_ADDR=127.0.0.1:6060`.          |
+| `make pprof-server` | Starts the server with `PPROF_ADDR=127.0.0.1:6061`.          |
+
+Tunables: `BENCH_RUNS`, `BENCH_BYTES`, `PPROF_CLIENT`, `PPROF_SERVER`.
+
+## Observability endpoints
+
+When `PPROF_ADDR` is set (e.g. `PPROF_ADDR=127.0.0.1:6060 ./bin/client`) the
+binary exposes:
+
+- `http://<addr>/debug/pprof/` — standard `net/http/pprof` index (cpu/heap/goroutine).
+- `http://<addr>/debug/vars`   — full `expvar` JSON registry.
+- `http://<addr>/metrics`      — Prometheus-style key/value text dump of the
+  counters declared in `internal/metrics`.
+
+The endpoint is bound to a private `http.ServeMux`, so importing the metrics
+package never mutates the default mux.
+
+## Lossy-link simulation
+
+The Go harness does not emulate packet loss itself — it relies on Linux's
+`netem` qdisc. Typical recipe on the loopback device:
+
+```bash
+sudo tc qdisc add dev lo root netem loss 5% delay 5ms
+make bench
+sudo tc qdisc del dev lo root
+```
+
+Substitute `loss 1%` / `delay 1ms` for the milder scenario.

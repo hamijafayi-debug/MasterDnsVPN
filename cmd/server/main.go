@@ -19,6 +19,7 @@ import (
 
 	"masterdnsvpn-go/internal/config"
 	"masterdnsvpn-go/internal/logger"
+	"masterdnsvpn-go/internal/metrics"
 	"masterdnsvpn-go/internal/runtimepath"
 	"masterdnsvpn-go/internal/security"
 	UDPServer "masterdnsvpn-go/internal/udpserver"
@@ -105,6 +106,17 @@ func main() {
 	log.Infof("============================================================")
 
 	log.Infof("\U0001F680 <magenta>MasterDnsVPN Server starting ...</magenta>")
+
+	// Optional pprof/metrics endpoint. Driven entirely by the PPROF_ADDR env
+	// variable so production builds default to "off" (empty string ⇒ no
+	// listener, zero overhead). Format: host:port, e.g. 127.0.0.1:6060.
+	if pprofShutdown, perr := metrics.StartPprof(os.Getenv("PPROF_ADDR"), func(line string) {
+		log.Infof("\U0001F50E <cyan>%s</cyan>", line)
+	}); perr != nil {
+		log.Warnf("pprof endpoint failed to start: %v", perr)
+	} else {
+		defer pprofShutdown()
+	}
 
 	keyInfo, err := security.EnsureServerEncryptionKey(cfg)
 	if err != nil {
