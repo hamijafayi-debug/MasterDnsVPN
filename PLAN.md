@@ -46,23 +46,25 @@
 - [x] استپ ۲ — Allocation Hotspots: گسترش sync.Pool به hot-path‌ها  ✅ 2026-05-25
 - [x] استپ ۳ — Logging Fast-Path: حذف رشته‌سازی در سطح Debug غیرفعال  ✅ 2026-05-25
 - [x] استپ ۴ — ARQ Receive Path & Buffer Reuse  ✅ 2026-05-25
-- [ ] استپ ۵ — ARQ Send Path & Adaptive RTO Tuning
-- [ ] استپ ۶ — Balancer Lock Granularity & Selection Fast-Path
-- [ ] استپ ۷ — UDP Server Ingress: Batch Read & Worker Sizing
-- [ ] استپ ۸ — Session Store Sharding (server-side)
-- [ ] استپ ۹ — DNS Parser Zero-Copy & Reusable Decoders
-- [ ] استپ ۱۰ — Compression Pools & Threshold Heuristics
-- [ ] استپ ۱۱ — Crypto Hot-Path: AEAD nonce reuse & buffer alignment
-- [ ] استپ ۱۲ — MTU Discovery: همگرایی سریع‌تر و backoff هوشمند
-- [ ] استپ ۱۳ — Resolver Health: تشخیص سریع‌تر outage و reactivation هوشمند
-- [ ] استپ ۱۴ — Duplication Policy: انتخاب وفقی به جای ثابت
-- [ ] استپ ۱۵ — SOCKS5 Upstream: connection pooling و reuse
-- [ ] استپ ۱۶ — Cache Layer: dnscache زیرساخت hot/cold و prune بهینه
-- [ ] استپ ۱۷ — Goroutine Audit & Lifecycle (نشت‌یاب)
-- [ ] استپ ۱۸ — Backpressure & Bounded Queues تمام لایه‌ها
-- [ ] استپ ۱۹ — CI Regression Bench (محافظ سرعت در PR‌ها)
-- [ ] استپ ۲۰ — Race & Fuzz Sweep
-- [ ] استپ ۲۱ — Release Hardening (build flags, PGO, strip, GOAMD64)
+- [x] استپ ۵ — ARQ Send Path & Adaptive RTO Tuning  ✅ 2026-05-25
+- [x] استپ ۶ — Fix Preexisting Test Flakiness (race)  ✅ 2026-05-25 (تزریق‌شده، رفع باگ از استپ ۴/۵)
+- [ ] استپ ۷ — Fix ARQ.Close isVirtual race (production) — اولویت بالا (تزریق‌شده، رفع باگ از استپ ۶)
+- [ ] استپ ۸ — Balancer Lock Granularity & Selection Fast-Path
+- [ ] استپ ۹ — UDP Server Ingress: Batch Read & Worker Sizing
+- [ ] استپ ۱۰ — Session Store Sharding (server-side)
+- [ ] استپ ۱۱ — DNS Parser Zero-Copy & Reusable Decoders
+- [ ] استپ ۱۲ — Compression Pools & Threshold Heuristics
+- [ ] استپ ۱۳ — Crypto Hot-Path: AEAD nonce reuse & buffer alignment
+- [ ] استپ ۱۴ — MTU Discovery: همگرایی سریع‌تر و backoff هوشمند
+- [ ] استپ ۱۵ — Resolver Health: تشخیص سریع‌تر outage و reactivation هوشمند
+- [ ] استپ ۱۶ — Duplication Policy: انتخاب وفقی به جای ثابت
+- [ ] استپ ۱۷ — SOCKS5 Upstream: connection pooling و reuse
+- [ ] استپ ۱۸ — Cache Layer: dnscache زیرساخت hot/cold و prune بهینه
+- [ ] استپ ۱۹ — Goroutine Audit & Lifecycle (نشت‌یاب)
+- [ ] استپ ۲۰ — Backpressure & Bounded Queues تمام لایه‌ها
+- [ ] استپ ۲۱ — CI Regression Bench (محافظ سرعت در PR‌ها)
+- [ ] استپ ۲۲ — Race & Fuzz Sweep
+- [ ] استپ ۲۳ — Release Hardening (build flags, PGO, strip, GOAMD64)
 
 ---
 
@@ -159,15 +161,23 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 2. **Wire compatibility**: هیچ بایتی روی wire اضافه نشد. هر طرف budget و آستانه خودش رو محلی اعمال می‌کنه. سرور و کلاینت با ورژن‌های مختلف Step 5 / Step 4 بدون مشکل کار می‌کنن.
 3. **Hint optimization (`sndLoBoundSN`)**: یک uint16 کش که قدیمی‌ترین SN در sndBuf رو track می‌کنه. اجازه می‌ده ACK های in-order در بار سنگین، با یه مقایسه (`seqBehind(ackSN, lo)`) از walk بپرن.
 
-### استپ ۶ (تزریق‌شده / اولویت بالا) — Fix Preexisting Test Flakiness (race)
-هدف: پایدارسازی suite تست تحت `-race` تا CI و حلقه development بدون noise باشه. این استپ از باگ‌های preexisting که در Step 4 و Step 5 لاگ شدن جدا و قبل از ادامه استپ‌های perf اجرا می‌شه. **production code تغییر نمی‌کنه — فقط test code و احتمالاً isolation اولیه bufpool/expvar بین تست‌ها.**
-- [ ] reproduce پایدار با iteration count بالا روی `TestProcessDeferredSOCKS5SynDoesNotAttachAfterCancellation` و `TestARQ_ReceiveDataClearsQueuedNackWhenMissingDataArrives` و capture کامل race report
-- [ ] بررسی منبع race (احتمال‌ها: shared global state بین تست‌ها، goroutine leak بین تست‌ها، interaction `bufpool`/`expvar`)
-- [ ] رفع در سطح test infra (مثلاً `t.Cleanup` برای drain کردن goroutine، یا isolation کردن state per-test) — **بدون تغییر production code**
-- [ ] اجرای `go test -race ./... -count=10` و تأیید پایداری 100%
-- [ ] بازکردن دو bullet مربوطه در `🐛 باگ‌های یافته‌شده` با علامت ✅ resolved
+### استپ ۶ (تزریق‌شده / اولویت بالا) — Fix Preexisting Test Flakiness (race) ✅ (تکمیل‌شده — 2026-05-25)
+هدف: پایدارسازی suite تست تحت `-race` تا CI و حلقه development بدون noise باشه. این استپ از باگ‌های preexisting که در Step 4 و Step 5 لاگ شدن جدا و قبل از ادامه استپ‌های perf اجرا می‌شه. **production code تغییر نمی‌کنه — فقط test code.**
+- [x] reproduce پایدار با iteration count بالا روی `TestProcessDeferredSOCKS5SynDoesNotAttachAfterCancellation` و `TestARQ_ReceiveDataClearsQueuedNackWhenMissingDataArrives` — **هر دو در ۵ ران اول reproduce شدن و race report کامل capture شد**
+- [x] بررسی منبع race — **(۱) `testNetConn.closed` بدون lock بود؛ تست در یک goroutine read می‌کرد، production cleanup `dialTCPTargetContext.func2()` در goroutine دیگر write می‌کرد. (۲) تست ARQ بعد از receive کردن ACK packet بلافاصله `removedNackSeqs` را چک می‌کرد، ولی `clearSentDataNack` بعد از ACK push (async) اجرا می‌شه — time-of-check race. (۳) `buildTCPTestClient` بدون cleanup بود؛ تست‌هایی مثل `TestForceCloseStreamQueuesRST` که فقط RST queue می‌کنن (نه `ARQ.Close(Force)`) goroutine retransmit ARQ را زنده می‌گذارند تا تست بعدی، که در حافظه reuse شده مال stream قدیمی می‌نویسه.**
+- [x] رفع در سطح test infra — **(۱) `testNetConn.closed` → `atomic.Bool` + helper `IsClosed()` در `stream_syn_test.go`؛ همه‌ی ۴ سایت‌خوان به `conn.IsClosed()` migrate شدن. (۲) تست ARQ با polling 500ms به جای assertion آنی، با کپی thread-safe از `removedNackSeqs`. (۳) `buildTCPTestClient(t)` با `t.Cleanup` که stream‌های لخت‌مانده را با Force می‌بنده (با 20ms settling delay قبل از Close برای اجتناب از یک race جداگانه‌ی production در `ARQ.Close.isVirtual` که جداگانه ثبت شده — این delay فقط در path testing است).**
+- [x] اجرای `go test -race ./... -count=10` — **هر دو تست هدف با count=20 پاس می‌شن، client package با count=10 پاس می‌شه. یک flaky preexisting دیگر در `TestBalancerLossThenLatencyRoundRobinsAcrossNearTopCandidates` (assertion flakiness — یعنی round-robin همه‌ی resolverها رو ندیده، نه race) به‌عنوان باگ جدید ثبت شد، خارج از scope این استپ.**
+- [x] بازکردن دو bullet مربوطه در `🐛 باگ‌های یافته‌شده` با علامت ✅ resolved — **هر دو علامت‌گذاری شدن. یک باگ production جدید در `ARQ.Close.isVirtual` (read at line 3238 vs write at line 3244 بدون lock) ثبت شد، و یک flaky جدید balancer.**
 
-### استپ ۷ — Balancer Lock Granularity & Selection Fast-Path
+### استپ ۷ (تزریق‌شده / اولویت بالا) — Fix ARQ.Close isVirtual race (production)
+هدف: رفع race detected در `internal/arq/arq.go:3238 vs :3244` که در حین استپ ۶ expose شد. این **production code race** است که هر زمان دو caller همزمان `ARQ.Close` صدا بزنن می‌تونه trigger بشه (مثلاً ioLoop داخلی هنگام terminal drain + caller خارجی).
+- [ ] بازبینی همه‌ی سایت‌های read `a.isVirtual` (۸ سایت در `arq.go`) و تصمیم: یا تبدیل به `atomic.Bool`، یا قرار دادن همه‌ی read‌ها داخل `a.mu.Lock`
+- [ ] انتخاب کم‌هزینه‌ترین گزینه از نظر perf — احتمالاً `atomic.Bool` چون read pattern تک‌خوانش‌ی و سریع است
+- [ ] حذف 20ms settling delay از `t.Cleanup` در `tcp_stream_test.go` (که به‌عنوان workaround در استپ ۶ گذاشته شد) و تأیید پایداری race-tests
+- [ ] افزودن تست واحد همزمانی Close (مثلاً ۲ goroutine که Close را موازی صدا می‌زنن، با Force/non-Force) — تأیید race detector صفر warning
+- [ ] اجرای `go test -race ./... -count=10` و تأیید پایداری 100% بدون settling delay
+
+### استپ ۸ — Balancer Lock Granularity & Selection Fast-Path
 هدف: کاهش contention روی balancer mutex وقتی resolver زیاد است.
 - [ ] تفکیک قفل خواندن `GetBestConnection` از قفل نوشتن stats — `RWMutex` و read-mostly path
 - [ ] cache رتبه‌بندی resolverها در snapshot بدون قفل، بازسازی فقط هنگام تغییر
@@ -301,9 +311,12 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 <!-- هنگام برخورد باگ در حین استپ، اینجا یک‌خطی ثبت می‌شود -->
 
 - **[Step 4 / TEST-only]** Race در `testLogger.Debugf`: goroutine‌های ARQ که از life-cycle تست عبور می‌کردن (writeLoop → finalizeClose → testLogger.Debugf → t.Logf) data race روی `testing.common` ایجاد می‌کردن. روی main پنهان بود ولی defer جدید Step 4 timing رو شیفت داد و expose شد. **رفع‌شده در Step 4** با بازنویسی `testLogger` (sync.RWMutex + t.Cleanup gate). فقط test code، تأثیر صفر روی production.
-- **[Step 4 / preexisting / udpserver]** `TestProcessDeferredSOCKS5SynDoesNotAttachAfterCancellation` در `internal/udpserver/stream_syn_test.go` تحت `-race` fail می‌شه (data race در `dialTCPTargetContext`). روی commit `d709b6d` (قبل از Step 4) هم وجود داره. **برای استپ آینده اختصاصی** — نه scope این استپ، نه blocker.
+- **[Step 4 / preexisting / udpserver]** ✅ **resolved در Step 6** — `TestProcessDeferredSOCKS5SynDoesNotAttachAfterCancellation` در `internal/udpserver/stream_syn_test.go`. علت اصلی: `testNetConn.closed` بدون lock، تست در یک goroutine read و production cleanup `dialTCPTargetContext.func2` در goroutine دیگر write. fix: `closed` → `atomic.Bool` + helper `IsClosed()`. **فقط test code، production دست‌نخورده. تأیید: count=20 پاس.**
 - **[Step 5 / observation / no fix needed]** فعال‌سازی fast-retx (`ARQ_FAST_RETX_THRESHOLD=3`) روی بنچ loopback با `ARQ_WINDOW_SIZE=16384` و payload 10 MiB، Up throughput رو از 2.54 → 1.22 MiB/s افت می‌ده و 2/3 ران FAIL می‌شه. علت: روی loopback که loss واقعی صفره، OOS-ACK های ناشی از reordering جزئی (queue contention) باعث spurious fast-retransmit می‌شن که bandwidth رو هدر می‌ده. **mitigation**: default = disabled (که در همین Step اعمال شد). کاربر روی مسیر lossy می‌تونه opt-in کنه. این رفتار مطلوبه — feature صرفاً وقتی sense می‌ده که loss واقعی > overhead باشه.
-- **[Step 5 / preexisting / TEST-only / flaky]** `TestARQ_ReceiveDataClearsQueuedNackWhenMissingDataArrives` در `internal/arq/arq_test.go` تحت `-race` به‌صورت intermittent (~20-40% احتمال) FAIL می‌شه **فقط وقتی همراه سایر تست‌های suite اجرا بشه** (در isolation 10/10 پاس می‌شه). روی commit `0b89e36` (Step 4 baseline) قبل از تغییرات Step 5 هم با همین نرخ FAIL می‌شه، پس preexisting است. علت احتمالی: interaction با global state (احتمالاً `bufpool` یا `expvar`) بین تست‌ها. **برای استپ آینده اختصاصی** — نه scope این استپ، نه blocker. تست‌های Step 5 (13 تست + 3 بنچ) خودشون 100% پایدار هستن.
+- **[Step 5 / preexisting / TEST-only / flaky]** ✅ **resolved در Step 6** — `TestARQ_ReceiveDataClearsQueuedNackWhenMissingDataArrives` در `internal/arq/arq_test.go`. علت اصلی: time-of-check race — تست بعد از receive کردن ACK packet آنی `removedNackSeqs` را چک می‌کرد، ولی `clearSentDataNack` (که `RemoveQueuedDataNack` را صدا می‌زنه) **بعد از** ACK push اجرا می‌شه و async است. fix: polling 500ms با کپی thread-safe. **تأیید: count=20 پاس.**
+- **[Step 6 / preexisting / TEST-only]** ✅ **resolved در همین Step 6** — `TestAsyncStreamCleanupWorker` و `TestApplyPlannerNoConnectionPolicyRequeuesDataTask` در `internal/client/`. علت: `buildTCPTestClient` بدون cleanup، تست‌هایی مثل `TestForceCloseStreamQueuesRST` فقط RST queue می‌کنن (نه `ARQ.Close(Force)`)، goroutine retransmit ARQ زنده می‌مونه تا تست بعدی stream جدید در حافظه reuse می‌سازه و race detector write/read متناقض می‌بینه. fix: `buildTCPTestClient(t)` با `t.Cleanup` که stream‌های هنوز فعال را Force-close می‌کنه (با 20ms settling delay).
+- **[Step 6 / NEW / production / race]** 🆕 `ARQ.Close()` در `internal/arq/arq.go` خط 3238 `a.isVirtual` را بدون lock می‌خوانَد (`if a.isVirtual && !opts.Force`) ولی در خط 3244 آن را با lock می‌نویسد (`a.isVirtual = false`). اگر دو Caller همزمان Close صدا بزنن (مثلاً ioLoop داخلی + caller خارجی)، race detector flag می‌زنه. در Step 6 با 20ms settling delay در test cleanup workaround شد، ولی **نیاز به فیکس production در یک استپ اختصاصی** داره — احتمالاً تبدیل `isVirtual` به `atomic.Bool` یا read آن داخل همون `mu.Lock` که write را انجام می‌ده. **اولویت بالا — استپ تخصیص‌دار قبل از استپ‌های perf بعدی.**
+- **[Step 6 / NEW / TEST-only / flaky]** 🆕 `TestBalancerLossThenLatencyRoundRobinsAcrossNearTopCandidates` در `internal/client/balancer_test.go:233` به‌صورت intermittent FAIL می‌شه (`expected round-robin across near-top candidates, seen=map[a:true]`). این **race نیست** — assertion flakiness است که احتمالاً به ترتیب اجرا یا scheduling حساسیت داره. preexisting (وابسته به این Step نیست). برای استپ آینده.
 
 ---
 

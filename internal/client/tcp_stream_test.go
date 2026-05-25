@@ -18,8 +18,8 @@ import (
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
-func buildTCPTestClient() *Client {
-	return buildTestClientWithResolvers(config.ClientConfig{
+func buildTCPTestClient(t *testing.T) *Client {
+	c := buildTestClientWithResolvers(config.ClientConfig{
 		ProtocolType:                "TCP",
 		ARQWindowSize:               64,
 		ARQInitialRTOSeconds:        0.2,
@@ -27,10 +27,50 @@ func buildTCPTestClient() *Client {
 		ARQControlInitialRTOSeconds: 0.2,
 		ARQControlMaxRTOSeconds:     1.0,
 	}, "resolver-a")
+	// Force-close every stream that is still active when the test ends so
+	// the ARQ retransmit goroutine started by new_stream → ARQ.Start does
+	// not outlive the test body and write into reused memory in the next
+	// test of the same package. We only force-close streams that are NOT
+	// already marked terminal: closing a stream twice triggers a known
+	// production-code race in ARQ.Close()'s isVirtual read/write pair
+	// (logged in PLAN.md bug log for a dedicated fix step). Test-only
+	// safety net — production code untouched.
+	if t != nil {
+		t.Cleanup(func() {
+			c.streamsMu.Lock()
+			streams := make([]*Stream_client, 0, len(c.active_streams))
+			for _, s := range c.active_streams {
+				streams = append(streams, s)
+			}
+			c.streamsMu.Unlock()
+
+			// Give any in-flight ioLoop/deferTerminalPacket goroutines a
+			// brief moment to settle their own Close() call before we
+			// race them with a Cleanup-driven Close(). This works around
+			// a known production-code race in ARQ.Close()'s isVirtual
+			// read/write pair (logged in PLAN.md under bugs for a
+			// dedicated fix step). 20ms is plenty for the in-process
+			// Close finalisation to complete on a loopback test.
+			if len(streams) > 0 {
+				time.Sleep(20 * time.Millisecond)
+			}
+
+			for _, s := range streams {
+				if s == nil {
+					continue
+				}
+				if !s.TerminalSince().IsZero() {
+					continue // already closed by the test body
+				}
+				s.Close()
+			}
+		})
+	}
+	return c
 }
 
 func TestHandleTCPConnectQueuesStreamSyn(t *testing.T) {
-	c := buildTCPTestClient()
+	c := buildTCPTestClient(t)
 	c.syncedUploadMTU = 64
 
 	local, remote := net.Pipe()
@@ -71,7 +111,7 @@ func TestHandleTCPConnectQueuesStreamSyn(t *testing.T) {
 }
 
 func TestHandleStreamPacketConnectedEnablesTCPStreamIO(t *testing.T) {
-	c := buildTCPTestClient()
+	c := buildTCPTestClient(t)
 	c.syncedUploadMTU = 64
 
 	local, remote := net.Pipe()
@@ -110,7 +150,7 @@ func TestHandleStreamPacketConnectedEnablesTCPStreamIO(t *testing.T) {
 }
 
 func TestHandleStreamPacketConnectFailClosesTCPStream(t *testing.T) {
-	c := buildTCPTestClient()
+	c := buildTCPTestClient(t)
 	c.syncedUploadMTU = 64
 
 	local, remote := net.Pipe()
@@ -152,7 +192,7 @@ func TestHandleStreamPacketConnectFailClosesTCPStream(t *testing.T) {
 }
 
 func TestRecentlyClosedCloseReadStreamSuppressesLateOrphanReset(t *testing.T) {
-	c := buildTCPTestClient()
+	c := buildTCPTestClient(t)
 	stream := c.new_stream(32, nil, nil)
 
 	stream.OnARQClosed("close handshake completed")
@@ -182,7 +222,7 @@ func TestRecentlyClosedCloseReadStreamSuppressesLateOrphanReset(t *testing.T) {
 }
 
 func TestRecentlyClosedResetStreamSuppressesLateOrphanReset(t *testing.T) {
-	c := buildTCPTestClient()
+	c := buildTCPTestClient(t)
 	stream := c.new_stream(33, nil, nil)
 
 	stream.OnARQClosed("peer reset received")
@@ -213,7 +253,7 @@ func TestRecentlyClosedResetStreamSuppressesLateOrphanReset(t *testing.T) {
 }
 
 func TestRecentlyClosedStreamStillAcksLateSocksConnected(t *testing.T) {
-	c := buildTCPTestClient()
+	c := buildTCPTestClient(t)
 	stream := c.new_stream(41, nil, nil)
 
 	stream.OnARQClosed("close handshake completed")
@@ -237,7 +277,7 @@ func TestRecentlyClosedStreamStillAcksLateSocksConnected(t *testing.T) {
 }
 
 func TestMissingUnknownStreamStillQueuesOrphanReset(t *testing.T) {
-	c := buildTCPTestClient()
+	c := buildTCPTestClient(t)
 
 	handled := c.preprocessInboundPacket(VpnProto.Packet{
 		PacketType:  Enums.PACKET_STREAM_CLOSE_READ,
@@ -253,7 +293,7 @@ func TestMissingUnknownStreamStillQueuesOrphanReset(t *testing.T) {
 }
 
 func TestTerminalStreamDataQueuesRST(t *testing.T) {
-	c := buildTCPTestClient()
+	c := buildTCPTestClient(t)
 	stream := c.new_stream(34, nil, nil)
 
 	stream.MarkTerminal(time.Now())
@@ -284,7 +324,7 @@ func TestTerminalStreamDataQueuesRST(t *testing.T) {
 }
 
 func TestRecentlyClosedStreamDataQueuesRST(t *testing.T) {
-	c := buildTCPTestClient()
+	c := buildTCPTestClient(t)
 	stream := c.new_stream(42, nil, nil)
 	stream.OnARQClosed("close handshake completed")
 
@@ -310,7 +350,7 @@ func TestRecentlyClosedStreamDataQueuesRST(t *testing.T) {
 }
 
 func TestForceCloseStreamQueuesRST(t *testing.T) {
-	c := buildTCPTestClient()
+	c := buildTCPTestClient(t)
 	local, remote := net.Pipe()
 	defer remote.Close()
 
@@ -337,7 +377,7 @@ func TestForceCloseStreamQueuesRST(t *testing.T) {
 }
 
 func TestGracefulCloseStreamQueuesCloseRead(t *testing.T) {
-	c := buildTCPTestClient()
+	c := buildTCPTestClient(t)
 	local, remote := net.Pipe()
 	defer local.Close()
 	defer remote.Close()
@@ -358,7 +398,7 @@ func TestGracefulCloseStreamQueuesCloseRead(t *testing.T) {
 }
 
 func TestLateSocksConnectedAfterCancellationQueuesRST(t *testing.T) {
-	c := buildTCPTestClient()
+	c := buildTCPTestClient(t)
 	local, remote := net.Pipe()
 	defer remote.Close()
 
@@ -387,7 +427,7 @@ func TestLateSocksConnectedAfterCancellationQueuesRST(t *testing.T) {
 }
 
 func TestLateStreamConnectedAfterCancellationQueuesRST(t *testing.T) {
-	c := buildTCPTestClient()
+	c := buildTCPTestClient(t)
 	local, remote := net.Pipe()
 	defer remote.Close()
 
@@ -416,7 +456,7 @@ func TestLateStreamConnectedAfterCancellationQueuesRST(t *testing.T) {
 }
 
 func TestCloseAllStreamsFinalizesLocally(t *testing.T) {
-	c := buildTCPTestClient()
+	c := buildTCPTestClient(t)
 
 	localA, remoteA := net.Pipe()
 	defer remoteA.Close()
@@ -494,7 +534,7 @@ func TestFakeConnReadDeadlineReturnsTimeout(t *testing.T) {
 }
 
 func TestRecentlyClosedHeapStaleEntryGrowth(t *testing.T) {
-	c := buildTCPTestClient()
+	c := buildTCPTestClient(t)
 	now := time.Now()
 
 	for cycle := 0; cycle < 10; cycle++ {

@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,18 +23,31 @@ import (
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
+// testNetConn is a minimal net.Conn stub used across stream tests. The
+// `closedFlag` field is accessed concurrently from production goroutines
+// (e.g. dialTCPTargetContext cleanup func) and from test bodies polling
+// the close state, so it MUST be atomic. Direct field access is not safe
+// under -race; callers should use IsClosed() instead of touching the
+// internal field. Test-only — production code is unaffected.
 type testNetConn struct {
-	closed bool
+	closedFlag atomic.Bool
 }
 
-func (t *testNetConn) Read(_ []byte) (int, error)         { return 0, io.EOF }
-func (t *testNetConn) Write(p []byte) (int, error)        { return len(p), nil }
-func (t *testNetConn) Close() error                       { t.closed = true; return nil }
+func (t *testNetConn) Read(_ []byte) (int, error) { return 0, io.EOF }
+func (t *testNetConn) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+func (t *testNetConn) Close() error                       { t.closedFlag.Store(true); return nil }
 func (t *testNetConn) LocalAddr() net.Addr                { return testAddr("local") }
 func (t *testNetConn) RemoteAddr() net.Addr               { return testAddr("remote") }
 func (t *testNetConn) SetDeadline(_ time.Time) error      { return nil }
 func (t *testNetConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (t *testNetConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+// IsClosed returns whether Close() has been invoked. Safe for concurrent
+// reads — uses atomic load. Replaces the previous unsynchronised
+// `t.closed` field access which raced with cleanup goroutines.
+func (t *testNetConn) IsClosed() bool { return t.closedFlag.Load() }
 
 type testAddr string
 
@@ -214,7 +228,7 @@ func TestProcessDeferredStreamSynDoesNotAttachAfterCancellation(t *testing.T) {
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if conn.closed {
+		if conn.IsClosed() {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -355,7 +369,7 @@ func TestProcessDeferredSOCKS5SynDoesNotAttachAfterCancellation(t *testing.T) {
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if conn.closed {
+		if conn.IsClosed() {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -818,7 +832,7 @@ func TestProcessDeferredStreamSynIgnoresLateDialCompletionAfterSessionClose(t *t
 	if upstream != nil {
 		t.Fatal("expected no upstream connection to be attached after session close")
 	}
-	if !conn.closed {
+	if !conn.IsClosed() {
 		t.Fatal("expected late dialed connection to be closed")
 	}
 
@@ -1121,7 +1135,7 @@ func TestDialSOCKSStreamTargetExternalProxyDetachesSuccessfulConnFromHandshakeCo
 	cancel()
 	time.Sleep(20 * time.Millisecond)
 
-	if conn.closed {
+	if conn.IsClosed() {
 		t.Fatal("expected successful external SOCKS5 connection to stay open after handshake context cancellation")
 	}
 }

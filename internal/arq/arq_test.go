@@ -996,11 +996,24 @@ func TestARQ_ReceiveDataClearsQueuedNackWhenMissingDataArrives(t *testing.T) {
 	a.ReceiveData(0, []byte("packet 0"))
 	<-enqueuer.Packets
 
+	// processReceivedData is asynchronous: after the ACK push for sn=0
+	// (which we drained above) the goroutine still has to run
+	// clearSentDataNack → RemoveQueuedDataNack. Poll briefly instead of
+	// asserting immediately so the test isn't time-of-check racy.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		enqueuer.mu.Lock()
+		removed := append([]uint16(nil), enqueuer.removedNackSeqs...)
+		enqueuer.mu.Unlock()
+		if len(removed) == 1 && removed[0] == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
 	enqueuer.mu.Lock()
 	defer enqueuer.mu.Unlock()
-	if len(enqueuer.removedNackSeqs) != 1 || enqueuer.removedNackSeqs[0] != 0 {
-		t.Fatalf("expected queued NACK purge for seq 0, got %#v", enqueuer.removedNackSeqs)
-	}
+	t.Fatalf("expected queued NACK purge for seq 0 within 500ms, got %#v", enqueuer.removedNackSeqs)
 }
 
 func TestARQ_ClearAllQueuesDropsRememberedDataNacks(t *testing.T) {
