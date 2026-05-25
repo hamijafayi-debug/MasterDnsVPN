@@ -30,6 +30,13 @@ type ServerConfig struct {
 	UDPHost                           string   `toml:"UDP_HOST"`
 	UDPPort                           int      `toml:"UDP_PORT"`
 	UDPReaders                        int      `toml:"UDP_READERS"`
+	// Step 9 — UDP batch ingress. Tri-state: 0 = auto (enabled on Linux,
+	// off elsewhere — the default), 1 = force on (only effective on Linux,
+	// silently ignored on other platforms because the upstream ipv4
+	// wrapper would just call ReadFrom under the hood), 2 = force off.
+	// Local-only knob: nothing on the wire changes — purely the syscall
+	// path used by readers.
+	UDPBatchRead                      int      `toml:"UDP_BATCH_READ"`
 	SocketBufferSize                  int      `toml:"SOCKET_BUFFER_SIZE"`
 	MaxConcurrentRequests             int      `toml:"MAX_CONCURRENT_REQUESTS"`
 	DNSRequestWorkers                 int      `toml:"DNS_REQUEST_WORKERS"`
@@ -543,16 +550,45 @@ func (c ServerConfig) StreamFailurePacketTTL() time.Duration {
 }
 
 func (c ServerConfig) EffectiveUDPReaders() int {
-	recommended := min(max(runtime.NumCPU()/2, 1), 8)
-	if c.ProtocolType == "SOCKS5" && runtime.NumCPU() >= 4 && recommended < 2 {
+	// Step 9 — auto-tune readers against GOMAXPROCS. NumCPU() reflects the
+	// host CPU count, but GOMAXPROCS is what actually scheduled goroutine
+	// parallelism follows (cgroup-aware on Go 1.25). We want readers to
+	// scale with whichever is more constrained, so we pick min(NumCPU(),
+	// GOMAXPROCS).
+	cores := runtime.NumCPU()
+	if procs := runtime.GOMAXPROCS(0); procs > 0 && procs < cores {
+		cores = procs
+	}
+
+	recommended := min(max(cores/2, 1), 8)
+	if c.ProtocolType == "SOCKS5" && cores >= 4 && recommended < 2 {
 		recommended = 2
 	}
 
-	if c.MaxConcurrentRequests >= 32768 && runtime.NumCPU() >= 4 && recommended < 4 {
+	if c.MaxConcurrentRequests >= 32768 && cores >= 4 && recommended < 4 {
 		recommended = 4
 	}
 
 	return clampInt(max(c.UDPReaders, recommended), 1, 32)
+}
+
+// UDPBatchReadEnabled reports whether the configured tri-state for
+// UDP_BATCH_READ resolves to "use the batch ingress path on this run". This
+// is consulted exactly once per reader population in startReaders. Platform
+// gating (Linux only) is enforced separately by batchReadSupported() — this
+// helper only encodes the user's intent.
+func (c ServerConfig) UDPBatchReadEnabled() bool {
+	switch c.UDPBatchRead {
+	case 2:
+		return false
+	case 1:
+		return true
+	default:
+		// auto — on by default. The platform gate in startReaders
+		// short-circuits to the single-packet path on non-Linux even
+		// when this returns true.
+		return true
+	}
 }
 
 func (c ServerConfig) EffectiveDNSRequestWorkers() int {

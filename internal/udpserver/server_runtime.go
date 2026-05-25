@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"masterdnsvpn-go/internal/logger"
+	"masterdnsvpn-go/internal/metrics"
 )
 
 func (s *Server) configureSocketBuffers(conn *net.UDPConn) {
@@ -84,12 +85,25 @@ func (s *Server) startReaders(ctx context.Context, conns []*net.UDPConn, reqCh c
 		readerCount = 1
 	}
 
+	// Pick the ingress path once per reader population. The batch path
+	// (recvmmsg via golang.org/x/net/ipv4.PacketConn.ReadBatch) is only
+	// enabled when:
+	//   1. We are on Linux (batchReadSupported() == true), AND
+	//   2. The user has not explicitly disabled it via UDP_BATCH_READ.
+	// On non-Linux we silently take the single-packet path because the
+	// upstream ipv4 wrapper falls back to ReadFrom there and would only add
+	// allocation overhead.
+	loopFn := s.readLoop
+	if batchReadSupported() && s.cfg.UDPBatchReadEnabled() {
+		loopFn = s.batchReadLoop
+	}
+
 	if len(conns) > 1 {
 		for i, conn := range conns {
 			readerWG.Add(1)
 			go func(readerID int, readerConn *net.UDPConn) {
 				defer readerWG.Done()
-				if err := s.readLoop(ctx, readerConn, reqCh, readerID); err != nil {
+				if err := loopFn(ctx, readerConn, reqCh, readerID); err != nil {
 					select {
 					case readErrCh <- err:
 					default:
@@ -105,7 +119,7 @@ func (s *Server) startReaders(ctx context.Context, conns []*net.UDPConn, reqCh c
 		readerWG.Add(1)
 		go func(readerID int) {
 			defer readerWG.Done()
-			if err := s.readLoop(ctx, conn, reqCh, readerID); err != nil {
+			if err := loopFn(ctx, conn, reqCh, readerID); err != nil {
 				select {
 				case readErrCh <- err:
 				default:
@@ -194,6 +208,11 @@ func (s *Server) readLoop(ctx context.Context, conn *net.UDPConn, reqCh chan<- r
 			)
 			return err
 		}
+
+		// Ingress accounting. The batch-read path mirrors these two Add
+		// calls so observability stays consistent across both paths.
+		metrics.PacketsIn.Add(1)
+		metrics.BytesIn.Add(int64(n))
 
 		select {
 		case reqCh <- request{buf: buffer, size: n, addr: addr, conn: conn}:
