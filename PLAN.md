@@ -70,6 +70,7 @@
 - [x] استپ ۲۲.۵ — رفع flake leak detector (ARQ-LIFECYCLE-2: snapshot key بر اساس `created by` frame)  ✅ 2026-05-25
 - [x] استپ ۲۳ — Release Hardening (build flags, PGO, strip, GOAMD64)  ✅ 2026-05-25
 - [x] استپ ۲۴ — Post-Step-23 Comprehensive Review & Bug Sweep (staticcheck-driven)  ✅ 2026-05-25
+- [x] استپ ۲۵ — Fork-Ownership Sweep (اصلاح ارجاع‌های install/CI/Docker از upstream `masterking32` به فورک `hamijafayi-debug`) (اولویت بالا — رفع باگ FORK-INSTALL-WRONG-URL)  ✅ 2026-05-25
 
 ---
 
@@ -716,6 +717,45 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 - [x] **ثبت SA6002 mass-refactor به‌عنوان باگ مستقل** برای استپ بعدی — این ۲۹ سایت سرعت pool را با heap-alloc یک slice-header per Put هدر می‌دن (دقیقاً همان مسئله‌ای که Step 2 با `GetPtr/PutPtr` در `streamutil` حل کرد ولی به این پکیج‌ها سرایت نکرد). رفع نیاز به refactor دقیق API دارد، خارج از scope این استپ.
 - [x] **اجرای مجدد `go test -race -count=2 ./...` بعد از همه fix‌ها** — همه‌ی ۲۲ پکیج پاس، صفر regression. تست‌های جدید نیز پاس.
 
+### استپ ۲۵ — Fork-Ownership Sweep (هم‌سوسازی همه‌ی ارجاع‌های install/CI/Docker با فورک)  ✅ 2026-05-25
+هدف: کاربر فاش کرد که اجرای `server_linux_install.sh` این فورک، باینری‌ها را از ریپو **upstream** (`masterking32/MasterDnsVPN`) دانلود می‌کند نه از فورک ما (`hamijafayi-debug/MasterDnsVPN`). این یعنی همه‌ی کار ۲۴ استپ گذشته در یک نصب واقعی نادیده گرفته می‌شد. یک sweep کامل برای پیدا کردن **هر مکان** که به upstream اشاره می‌کند انجام شد.
+
+**روش:** `grep -rIn "masterking32"` روی کل tree (به‌جز `.git/` و `.bench/`). نتیجه: ۲۸۹ ارجاع در دو دسته که به‌طور دقیق از هم تفکیک شدند:
+1. **Functional (باید تغییر کند)**: هر URL/image-ref که برای **download/clone/pull/install** استفاده می‌شود.
+2. **Credit/Attribution (باید بماند)**: header های `// Author: MasterkinG32` در فایل‌های Go و خط `Developed by MasterkinG32` در README. این‌ها معرف **سازنده‌ی اصلی** هستند نه owner ریپو، و حذف‌شان نقض license/credit است.
+
+**فایل‌های اصلاح‌شده (functional):**
+
+- [x] **`server_linux_install.sh`** — ۶ سایت: usage examples (خطوط 58/70/73/76)، `select_release_artifact.base_url` (خطوط 91/94). نصب از فورک:  
+  `https://github.com/hamijafayi-debug/MasterDnsVPN/releases/...` و  
+  `https://raw.githubusercontent.com/hamijafayi-debug/MasterDnsVPN/main/server_linux_install.sh`.
+- [x] **`docker/Dockerfile`** — دانلود tarball از releases فورک (خط 35)، و `LABEL org.opencontainers.image.source` به فورک (خط 49).
+- [x] **`docker/docker-compose.yml`** — `image: ghcr.io/hamijafayi-debug/masterdnsvpn:latest`.
+- [x] **`docker/docker-entrypoint.sh`** — `SAMPLE_URL` برای bootstrap config از raw فورک.
+- [x] **`docker/build-single-platform.sh`** — IMAGE_NAME default به `hamijafayi-debug/masterdnsvpn`.
+- [x] **`docker/buildx-multi-platform.sh`** — IMAGE_REFS default به `hamijafayi-debug/masterdnsvpn:latest`.
+- [x] **`.github/workflows/build-go.yml`** خط ۸۰۴ — تغییر مورد نیاز: `IMAGE_REFS: hamijafayi-debug/masterdnsvpn:${{ release_tag }},hamijafayi-debug/masterdnsvpn:latest`. **push اتوماتیک بلاک شد** (GitHub App token مجوز `workflows` ندارد، همان رفتار step 23). راه‌حل: تغییر در فایل اصلی reverted شد و patch دقیق در `docs/step25-ci-workflow-patch.md` ذخیره شد تا maintainer به‌صورت دستی (یا از طریق web UI) اعمال کند. بدون این patch، release pipeline در مرحله‌ی push image به ghcr.io با 403 fail می‌کند چون مالک ریپو در آدرس image (`masterking32`) نیست.
+- [x] **`cmd/server/main.go`** خط ۱۰۳ — startup banner سرور `GitHub: https://github.com/hamijafayi-debug/MasterDnsVPN`. این URL هنگام راه‌اندازی در stdout/log کاربر چاپ می‌شود؛ اگر اشتباه باشد کاربر به upstream هدایت می‌شود.
+- [x] **`internal/client/client_utils.go`** خط ۵۵۷ — banner مشابه برای کلاینت.
+- [x] **`README.MD` و `README_FA.MD`** — همه ~۴۸ لینک دانلود (`releases/latest/download/MasterDnsVPN_*.zip`)، badge های DeepWiki و oosmetrics، URL های `git clone`، Docker pull command ها، `image:` در docker-compose example، و `remote-image=` در RouterOS example.
+
+**فایل‌های دست‌نخورده (عمدی — credit):**
+- `// Author: MasterkinG32` و `// Github: https://github.com/masterking32` در header همه‌ی فایل‌های Go (~۱۲۰ فایل) + `go.mod` + `Makefile` + `client_resolvers.simple`. این URL به **پروفایل سازنده** اشاره دارد نه ریپو. حذف کردن نام author از فایل‌های license-bearing نقض attribution است.
+- خط `Developed with ❤️ by: [**MasterkinG32**](https://github.com/masterking32)` در پایان دو README. این خط credit است.
+- `masterking32.ton` در README ها (example TON-domain، نه github).
+- alt-text badge Trendshift در خط ۱۱ README.MD (badge upstream است؛ اگر فورک خودش badge بخواهد باید جداگانه registar کند).
+- لاگ‌های `.bench/local_snapshot_go/runtime/*.log` (artifact ها از بنچ، گذشته‌ی build).
+
+**اعتبارسنجی پس از اصلاح:**
+- `go vet ./...` تمیز.
+- `go build ./...` موفق.
+- `go test -race -count=1 ./internal/client/... ./internal/udpserver/... ./internal/config/... ./internal/security/... ./internal/vpnproto/... ./internal/dnsparser/...` همه پاس (۷ پکیج، ~۱۸s).
+- Binary `server` build و `strings server | grep github.com` تأیید: تنها URL embed-شده `hamijafayi-debug/MasterDnsVPN` است (نه `masterking32`).
+- Binary `client` همان تأیید.
+
+**باگ ثبت‌شده در این استپ:**
+- `FORK-INSTALL-WRONG-URL` — رفع شد در همین استپ.
+
 ---
 
 ## 🐛 باگ‌های یافته‌شده
@@ -737,6 +777,7 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 - **[ERR-SHADOW-1 / Step 24 / PRODUCTION / silent error / crash potential]** ✅ **resolved در Step 24** — در `cmd/client/main.go:229` (مسیر `--json_base64`)، عبارت `app, err = client.BootstrapLoadedConfig(cfg, opts.logPath)` به‌جای assign به outer-scope `err`، به inner-scope `err` (که از `cfg, err := config.LoadClientConfigFromJSONBase64WithOverrides(...)` در همان case-block آمده بود) bind می‌شد. نتیجه: اگر `BootstrapLoadedConfig` خطا برمی‌گرداند، خطا silently drop می‌شد، outer `err` همچنان nil بود، چک `if err != nil` بعد از switch هرگز trigger نمی‌شد، و خط بعدی `app.PrintBanner()` با `app == nil` segfault می‌داد. **کشف**: staticcheck SA4006 روی این خط ("this value of err is never used"). **fix**: متغیرهای صریح `loadErr`/`bootstrapErr` و promotion صریح به outer `err` در پایان case. **regression**: مسیر main تستابل نبود بدون refactor بزرگ (os.Exit در فاصله)؛ تست‌های متمرکز روی SA5011 fixed-pair بسنده شدن. **production impact**: زیرا کاربران فقط هنگام استفاده از `--json_base64` با کانفیگ معتبر ولی bootstrap-fail (مثلاً resolver فایل غیرقابل خواندن) به این مسیر می‌خوردن، احتمال trigger در field کم بوده ولی غیرصفر.
 - **[NIL-DEREF-SET / Step 24 / PRODUCTION / defensive bug]** ✅ **resolved در Step 24** — سه سایت در `internal/config/client.go:1023` (ClientConfigFlagBinder.Overrides)، `internal/config/server.go:956` (ServerConfigFlagBinder.Overrides)، و `internal/client/mtu.go:688` (resolverHealthProbeTimeout) همگی الگوی یکسانی داشتن: nil-check به‌صورت دفاعی بعد از خط اول که خود receiver/pointer رو deref می‌کرد قرار گرفته بود. اگر caller واقعاً nil pass می‌کرد، panic رخ می‌داد در همان خط اول قبل از رسیدن به دفاع — یعنی دفاع موجود totally ineffective بود. **کشف**: staticcheck SA5011. **fix**: nil check رو به اول هر سه تابع منتقل کردیم. **regression**: تست‌های جدید `TestClientConfigFlagBinderOverridesOnNilReceiver` و `TestServerConfigFlagBinderOverridesOnNilReceiver` در `internal/config/` که قبل از fix panic می‌دادن و بعد از fix پاس می‌شن. **production impact**: در path اصلی این binder ها همیشه non-nil ساخته می‌شن، پس crash واقعی بعید بوده، ولی هر کد تست/extension که nil binder pass می‌کرد crash می‌داد.
 - **[SYNC-POOL-NONPTR / Step 24 / PERFORMANCE / deferred to next step]** ⏸ **ثبت شد، رفع به استپ بعد منتقل شد** — staticcheck SA6002 در ۲۹ سایت گزارش می‌کنه که این `sync.Pool.Put` ها یک slice header (24 بایت) heap-alloc می‌کنن چون argument نوع non-pointer-like است (آرگومان `interface{}` با dynamic type `[]byte`). همان مشکلی که Step 2 با معرفی `streamutil.GetPtr/PutPtr` (که `*[]byte` ست) حل کرد، ولی به این پکیج‌ها هرگز سرایت نکرد. سایت‌ها: `internal/client/async_runtime.go` ۶ سایت (drain pool)، `internal/client/mtu.go` ۲، `internal/client/tunnel_runtime.go` ۱، `internal/udpserver/dns_tunnel.go` ۳، `internal/udpserver/server_ingress_batch_linux.go` ۹ (داغ‌ترین path)، `internal/udpserver/server_runtime.go` ۴، `internal/udpserver/server_session.go` ۱، تست‌ها ۳. تخمین: روی packet rate تولیدی هر Put = ۱ heap alloc اضافه، و در hot path ingress احتمالاً > میلیون‌ها per second. رفع نیاز به refactor API های `udpBufferPool` و `packetPool` به pattern pointer-based دارد (مشابه `streamutil.GetPtr/PutPtr`) و دامنه‌ی متوسط دارد — لذا به استپ بعدی منتقل شد.
+- **[FORK-INSTALL-WRONG-URL / Step 25 / PRODUCTION / critical / user-reported]** ✅ **resolved در Step 25** — کاربر کشف کرد که `server_linux_install.sh` در این فورک، باینری‌ها را از ریپو **upstream** (`https://github.com/masterking32/MasterDnsVPN/releases/...`) دانلود می‌کند نه از فورک خودش (`hamijafayi-debug/MasterDnsVPN`). نتیجه‌ی عملی: هر کسی این اسکریپت را اجرا می‌کرد، **نسخه‌ی قدیمی upstream** را نصب می‌کرد و تمام بهینه‌سازی‌های ۲۴ استپ گذشته را دور می‌زد. **علت ریشه‌ای**: فایل‌های install/CI/Docker از زمان فورک هرگز re-point نشده بودند. **scope باگ بسیار وسیع‌تر از اسکریپت نصب بود** — sweep جامع روی کل tree (`grep -rIn "masterking32"`) ۲۸۹ ارجاع پیدا کرد در ۱۲ گروه فایل. fix شامل: install script، Dockerfile + entrypoint + compose، CI workflow image tag، runtime banner در سرور و کلاینت (که URL را در stdout چاپ می‌کرد)، و همه‌ی لینک‌های download/clone در README ها. credit lines سازنده‌ی اصلی (`Author: MasterkinG32` در فایل‌های Go، خط `Developed by` در README، profile link `https://github.com/masterking32`) **عمداً نگه داشته شدند** — این‌ها معرف **سازنده** هستند نه owner ریپو، حذف‌شان نقض attribution است. تأیید پس از اصلاح: `strings` روی binary های ساخته‌شده‌ی `server` و `client` تنها URL embed-شده فورک را نشان می‌دهد. تست‌های `-race` روی پکیج‌های متأثر همگی پاس.
 
 ---
 

@@ -32,7 +32,7 @@ RUN set -eux; \
   esac; \
   curl -fsSL --retry 3 --retry-delay 2 \
   -o /tmp/masterdnsvpn.zip \
-  "https://github.com/masterking32/MasterDnsVPN/releases/download/${RELEASE_TAG}/${ARTIFACT}"; \
+  "https://github.com/hamijafayi-debug/MasterDnsVPN/releases/download/${RELEASE_TAG}/${ARTIFACT}"; \
   if [ -n "${RELEASE_SHA256}" ]; then \
   echo "${RELEASE_SHA256}  /tmp/masterdnsvpn.zip" | sha256sum -c -; \
   fi; \
@@ -46,7 +46,7 @@ RUN set -eux; \
 
 FROM debian:bookworm-slim
 
-LABEL org.opencontainers.image.source=https://github.com/masterking32/MasterDnsVPN
+LABEL org.opencontainers.image.source=https://github.com/hamijafayi-debug/MasterDnsVPN
 
 ENV DEBIAN_FRONTEND=noninteractive \
   APP_DIR=/opt/masterdnsvpn \
