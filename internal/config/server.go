@@ -65,6 +65,27 @@ type ServerConfig struct {
 	StreamFailurePacketTTLSeconds     float64  `toml:"STREAM_FAILURE_PACKET_TTL_SECONDS"`
 	DNSCacheMaxRecords                int      `toml:"DNS_CACHE_MAX_RECORDS"`
 	DNSCacheTTLSeconds                float64  `toml:"DNS_CACHE_TTL_SECONDS"`
+	// Step 18 — DNS cache hot tier + amortized prune.
+	//
+	//   * DNSCacheHotTierSize — number of entries kept in the small
+	//     single-mutex LRU sitting in front of the sharded cold tier.
+	//     0 disables the hot tier (legacy single-tier behaviour). The
+	//     hot tier is automatically clamped to DNSCacheMaxRecords —
+	//     it cannot be larger than the cold tier.
+	//   * DNSCachePruneIntervalSeconds — how often the background
+	//     pruner sweeps expired entries from the cold tier. 0 disables
+	//     the background pruner (TTL-expired entries are still
+	//     dropped lazily on the next GetReady that hits them).
+	//   * DNSCachePruneMaxScanPerShard — bounded work per shard per
+	//     prune tick. Default 32 keeps the worst-case lock hold under
+	//     a few microseconds even on a 50k-record cache.
+	//
+	// All knobs are local-only — they don't change DNS/wire format,
+	// so an unmodified client talks to a hot-tier-enabled server
+	// identically to one running with the legacy code path.
+	DNSCacheHotTierSize               int      `toml:"DNS_CACHE_HOT_TIER_SIZE"`
+	DNSCachePruneIntervalSeconds      float64  `toml:"DNS_CACHE_PRUNE_INTERVAL_SECONDS"`
+	DNSCachePruneMaxScanPerShard      int      `toml:"DNS_CACHE_PRUNE_MAX_SCAN_PER_SHARD"`
 	UseExternalSOCKS5                 bool     `toml:"USE_EXTERNAL_SOCKS5"`
 	SOCKS5Auth                        bool     `toml:"SOCKS5_AUTH"`
 	SOCKS5User                        string   `toml:"SOCKS5_USER"`
@@ -187,6 +208,12 @@ func defaultServerConfig() ServerConfig {
 		StreamFailurePacketTTLSeconds:     120.0,
 		DNSCacheMaxRecords:                50000,
 		DNSCacheTTLSeconds:                300.0,
+		// Step 18 — defaults disable both the hot tier and the
+		// background pruner so existing deployments behave exactly
+		// as they did before. Operators opt in explicitly.
+		DNSCacheHotTierSize:               0,
+		DNSCachePruneIntervalSeconds:      0,
+		DNSCachePruneMaxScanPerShard:      32,
 		UseExternalSOCKS5:                 false,
 		SOCKS5Auth:                        false,
 		SOCKS5User:                        "admin",
@@ -443,6 +470,35 @@ func finalizeServerConfig(cfg ServerConfig) (ServerConfig, error) {
 
 	if cfg.DNSCacheTTLSeconds <= 0 {
 		cfg.DNSCacheTTLSeconds = 3600.0
+	}
+
+	// Step 18 — clamp the DNS cache hot tier + amortized pruner knobs.
+	//   * HotTierSize floor at 0 (disable) and ceiling at the cold
+	//     tier capacity (DNSCacheMaxRecords). The Store applies the
+	//     same clamp internally too, but doing it here keeps the
+	//     observable config value honest.
+	//   * PruneInterval floor at 0 (disable). Ceiling at 24h so the
+	//     pruner can never go silently idle for longer than that.
+	//   * PruneMaxScanPerShard floor at 1 and ceiling at 4096 (a
+	//     50k-record / 32-shard cache averages ~1.5k per shard, so
+	//     4096 is enough to do a full sweep in one tick if needed).
+	if cfg.DNSCacheHotTierSize < 0 {
+		cfg.DNSCacheHotTierSize = 0
+	}
+	if cfg.DNSCacheHotTierSize > cfg.DNSCacheMaxRecords {
+		cfg.DNSCacheHotTierSize = cfg.DNSCacheMaxRecords
+	}
+	if cfg.DNSCachePruneIntervalSeconds < 0 {
+		cfg.DNSCachePruneIntervalSeconds = 0
+	}
+	if cfg.DNSCachePruneIntervalSeconds > 86400.0 {
+		cfg.DNSCachePruneIntervalSeconds = 86400.0
+	}
+	if cfg.DNSCachePruneMaxScanPerShard < 1 {
+		cfg.DNSCachePruneMaxScanPerShard = 32
+	}
+	if cfg.DNSCachePruneMaxScanPerShard > 4096 {
+		cfg.DNSCachePruneMaxScanPerShard = 4096
 	}
 
 	// Step 17 — clamp the SOCKS5 upstream pool knobs.

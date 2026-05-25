@@ -133,11 +133,19 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 		deferredDNSSession:     newDeferredSessionProcessor(dnsDeferredWorkers, dnsDeferredQueue, log),
 		deferredConnectSession: newDeferredSessionProcessor(connectDeferredWorkers, connectDeferredQueue, log),
 		invalidCookieTracker:   newInvalidCookieTracker(),
-		dnsCache: dnsCache.New(
-			cfg.EffectiveDNSCacheMaxRecords(),
-			time.Duration(cfg.DNSCacheTTLSeconds*float64(time.Second)),
-			dnsFragmentTimeout,
-		),
+		dnsCache: func() *dnsCache.Store {
+			st := dnsCache.New(
+				cfg.EffectiveDNSCacheMaxRecords(),
+				time.Duration(cfg.DNSCacheTTLSeconds*float64(time.Second)),
+				dnsFragmentTimeout,
+			)
+			// Step 18 — opt-in hot tier. 0 leaves it disabled, preserving
+			// the legacy single-tier behaviour.
+			if cfg.DNSCacheHotTierSize > 0 {
+				st.EnableHotTier(cfg.DNSCacheHotTierSize)
+			}
+			return st
+		}(),
 		dnsResolveInflight: newDNSResolveInflightManager(dnsFragmentTimeout),
 		dnsUpstreamServers: append([]string(nil), cfg.DNSUpstreamServers...),
 		dnsFragments:       fragmentStore.New[dnsFragmentKey](cfg.EffectiveDNSFragmentStoreCapacity()),
@@ -342,6 +350,14 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.socks5UpstreamPool != nil {
 		s.socks5UpstreamPool.startReaper(runCtx)
 		defer s.socks5UpstreamPool.Close()
+	}
+	// Step 18 — DNS cache amortized pruner. 0 interval keeps the
+	// legacy lazy-on-read behaviour. The pruner exits cleanly when
+	// runCtx is cancelled below.
+	if s.cfg.DNSCachePruneIntervalSeconds > 0 && s.dnsCache != nil {
+		interval := time.Duration(s.cfg.DNSCachePruneIntervalSeconds * float64(time.Second))
+		maxScan := s.cfg.DNSCachePruneMaxScanPerShard
+		go s.runDNSCachePruner(runCtx, interval, maxScan)
 	}
 	s.startDNSWorkers(runCtx, conns[0], reqCh, &workerWG)
 

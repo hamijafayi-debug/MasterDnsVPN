@@ -19,6 +19,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"masterdnsvpn-go/internal/metrics"
 )
 
 type Status uint8
@@ -61,6 +63,135 @@ type shard struct {
 	mu    sync.RWMutex
 }
 
+// hotTier is a small single-mutex LRU cache that sits in front of the
+// sharded cold tier (step 18). It only caches StatusReady responses keyed
+// by the same cache key as the cold tier. On a hot-tier hit we skip the
+// per-shard mutex of the cold tier entirely — which is the whole point.
+//
+// The hot tier is *additive*: it never holds the only copy of an entry.
+// The cold tier remains the source of truth for persistence (SaveToFile)
+// and for pending-state bookkeeping. When the hot tier evicts an entry
+// (LRU tail) the cold tier still has it; when the cold tier expires or
+// evicts an entry, the next hot-tier lookup that finds a stale TTL
+// drops the hot copy on the floor (verified via isExpired against the
+// shared cacheTTL).
+//
+// Size 0 disables the tier (Enabled() == false): GetReady/SetReady
+// bypass it entirely, preserving the legacy single-tier behaviour.
+type hotTier struct {
+	mu    sync.Mutex
+	max   int
+	items map[string]*list.Element
+	order *list.List // *hotNode; back == MRU, front == LRU
+}
+
+type hotNode struct {
+	key   string
+	entry Entry // always StatusReady; Response is shared with the cold tier copy
+}
+
+func newHotTier(size int) *hotTier {
+	if size <= 0 {
+		return nil
+	}
+	return &hotTier{
+		max:   size,
+		items: make(map[string]*list.Element, size),
+		order: list.New(),
+	}
+}
+
+func (h *hotTier) Enabled() bool { return h != nil && h.max > 0 }
+
+// Get returns the entry copy if present and the cached LastUsedAt has not
+// already aged past ttl. Moves the entry to MRU on hit. Returns (Entry{},
+// false) on miss or stale.
+func (h *hotTier) Get(key string, now time.Time, ttl time.Duration) (Entry, bool) {
+	if !h.Enabled() {
+		return Entry{}, false
+	}
+	// Hot path: no defer — defer has a measurable overhead at ~100ns/op
+	// scales of latency we're targeting here.
+	h.mu.Lock()
+	element, ok := h.items[key]
+	if !ok {
+		h.mu.Unlock()
+		return Entry{}, false
+	}
+	node := element.Value.(*hotNode)
+	if ttl > 0 && now.Sub(node.entry.LastUsedAt) >= ttl {
+		// Stale by the same rule the cold tier uses. Drop and report
+		// miss so the caller falls through and refreshes.
+		delete(h.items, node.key)
+		h.order.Remove(element)
+		h.mu.Unlock()
+		return Entry{}, false
+	}
+	h.order.MoveToBack(element)
+	node.entry.LastUsedAt = now
+	entry := node.entry
+	h.mu.Unlock()
+	return entry, true
+}
+
+// Put inserts or refreshes the hot copy. Bounded by `max`; evicts LRU.
+// Response is stored by reference — callers must not mutate it after
+// handing it to Put (the cold tier already enforces this invariant).
+func (h *hotTier) Put(key string, entry Entry, now time.Time) {
+	if !h.Enabled() {
+		return
+	}
+	if entry.Status != StatusReady || len(entry.Response) == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if element, ok := h.items[key]; ok {
+		node := element.Value.(*hotNode)
+		node.entry = entry
+		node.entry.LastUsedAt = now
+		h.order.MoveToBack(element)
+		return
+	}
+	for len(h.items) >= h.max {
+		front := h.order.Front()
+		if front == nil {
+			break
+		}
+		node := front.Value.(*hotNode)
+		delete(h.items, node.key)
+		h.order.Remove(front)
+	}
+	entry.LastUsedAt = now
+	element := h.order.PushBack(&hotNode{key: key, entry: entry})
+	h.items[key] = element
+}
+
+// Invalidate removes a key from the hot tier; used when the cold tier
+// expires or evicts the corresponding entry so we never serve a stale
+// response from hot after cold has thrown it away.
+func (h *hotTier) Invalidate(key string) {
+	if !h.Enabled() {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if element, ok := h.items[key]; ok {
+		delete(h.items, key)
+		h.order.Remove(element)
+	}
+}
+
+func (h *hotTier) Len() int {
+	if !h.Enabled() {
+		return 0
+	}
+	h.mu.Lock()
+	n := len(h.items)
+	h.mu.Unlock()
+	return n
+}
+
 type Store struct {
 	maxRecords     int
 	cacheTTL       time.Duration
@@ -68,6 +199,20 @@ type Store struct {
 	shards         [shardCount]shard
 	pendingTotal   atomic.Uint64
 	dirty          atomic.Uint64 // used as a flag/counter
+
+	// Step 18 — hot tier in front of the sharded cold tier. nil when
+	// disabled (default). Wire-format / persistence behaviour is
+	// identical with or without the hot tier; it's a pure lookup
+	// accelerator.
+	hot *hotTier
+
+	// Step 18 — per-shard cursor for the amortized expired-entry
+	// pruner. PruneExpired scans at most `maxScanPerShard` entries
+	// per call per shard, then remembers where it left off in
+	// `pruneCursor[i]` (just a counter; we always walk from order.Front()
+	// and skip up to cursor, because list.Element pointers are not
+	// safe to remember across other mutations).
+	pruneCursor [shardCount]int
 }
 
 func New(maxRecords int, cacheTTL time.Duration, pendingTimeout time.Duration) *Store {
@@ -90,6 +235,38 @@ func New(maxRecords int, cacheTTL time.Duration, pendingTimeout time.Duration) *
 		s.shards[i].order = list.New()
 	}
 	return s
+}
+
+// EnableHotTier turns on the step-18 hot-tier in front of the sharded
+// cold tier. size <= 0 disables it (default). Calling EnableHotTier a
+// second time with a different size resets the hot tier — existing
+// contents are dropped (the cold tier still has them; the next lookup
+// just pays one cold-tier hit to repopulate). Safe to call before any
+// lookups; not safe to call concurrently with active lookups.
+func (s *Store) EnableHotTier(size int) {
+	if s == nil {
+		return
+	}
+	if size <= 0 {
+		s.hot = nil
+		return
+	}
+	// Clamp hot tier to maxRecords so it can never be larger than the
+	// cold tier — that would just waste memory without improving the
+	// hit rate.
+	if size > s.maxRecords {
+		size = s.maxRecords
+	}
+	s.hot = newHotTier(size)
+}
+
+// HotTierLen returns the current number of entries in the hot tier (0
+// when disabled). Test-only / observability helper.
+func (s *Store) HotTierLen() int {
+	if s == nil {
+		return 0
+	}
+	return s.hot.Len()
 }
 
 func BuildKey(domain string, qType uint16, qClass uint16) string {
@@ -143,6 +320,11 @@ func (s *Store) LookupOrCreatePending(key string, domain string, qType uint16, q
 			s.touchEntryLocked(shard, &node.entry, now)
 			if node.entry.Status == StatusReady {
 				shard.order.MoveToBack(element)
+				// Step 18 — count this as a cache hit too. The client
+				// path uses LookupOrCreatePending instead of GetReady,
+				// so without this every client-side hit would be
+				// invisible in expvar.
+				metrics.CacheHits.Add(1)
 				return LookupResult{
 					Status:   StatusReady,
 					Response: PatchResponseForQuery(node.entry.Response, nil),
@@ -178,6 +360,11 @@ func (s *Store) LookupOrCreatePending(key string, domain string, qType uint16, q
 	s.pendingTotal.Add(1)
 	s.dirty.Add(1)
 	s.evictIfNeededLocked(shard)
+	// Step 18 — first-time lookup on the client path is a cache miss.
+	// (The pending-already-exists branch above intentionally does NOT
+	// tick a miss: it isn't a fresh lookup, just a re-arrival on an
+	// in-flight query.)
+	metrics.CacheMisses.Add(1)
 	return LookupResult{
 		Status:         StatusPending,
 		DispatchNeeded: true,
@@ -189,6 +376,18 @@ func (s *Store) GetReady(key string, rawQuery []byte, now time.Time) ([]byte, bo
 		return nil, false
 	}
 
+	// Step 18 — hot tier fast path. The hot tier only ever holds
+	// StatusReady entries, so a hit here always returns. We use the
+	// same cacheTTL as the cold tier to decide staleness, which keeps
+	// TTL semantics observable to the rest of the system identical to
+	// the legacy single-tier behaviour.
+	if s.hot.Enabled() {
+		if entry, ok := s.hot.Get(key, now, s.cacheTTL); ok {
+			metrics.CacheHits.Add(1)
+			return PatchResponseForQuery(entry.Response, rawQuery), true
+		}
+	}
+
 	shardIdx := getShardIndex(key)
 	shard := &s.shards[shardIdx]
 
@@ -197,22 +396,32 @@ func (s *Store) GetReady(key string, rawQuery []byte, now time.Time) ([]byte, bo
 
 	element, ok := shard.items[key]
 	if !ok {
+		metrics.CacheMisses.Add(1)
 		return nil, false
 	}
 
 	node := element.Value.(*cacheNode)
 	if s.isExpired(&node.entry, now) {
 		s.removeElementLocked(shard, element)
+		metrics.CacheMisses.Add(1)
 		return nil, false
 	}
 	if node.entry.Status != StatusReady || len(node.entry.Response) == 0 {
 		s.touchEntryLocked(shard, &node.entry, now)
 		shard.order.MoveToBack(element)
+		metrics.CacheMisses.Add(1)
 		return nil, false
 	}
 
 	s.touchEntryLocked(shard, &node.entry, now)
 	shard.order.MoveToBack(element)
+	// Promote a copy into the hot tier. The hot tier stores its own
+	// shallow Entry; Response is shared by reference (immutable after
+	// SetReady normalises it), so there's no extra allocation here.
+	if s.hot.Enabled() {
+		s.hot.Put(key, node.entry, now)
+	}
+	metrics.CacheHits.Add(1)
 	return PatchResponseForQuery(node.entry.Response, rawQuery), true
 }
 
@@ -249,6 +458,13 @@ func (s *Store) SetReady(key string, domain string, qType uint16, qClass uint16,
 		node.entry.Response = normalized
 		s.dirty.Add(1)
 		shard.order.MoveToBack(element)
+		// Step 18 — keep hot tier coherent. Only refresh if the key
+		// already had a hot copy; we don't promote on every write,
+		// because writes (especially cold loads) shouldn't pollute the
+		// hot working set.
+		if s.hot.Enabled() {
+			s.hot.Invalidate(key)
+		}
 		return
 	}
 
@@ -265,6 +481,12 @@ func (s *Store) SetReady(key string, domain string, qType uint16, qClass uint16,
 	shard.items[key] = element
 	s.dirty.Add(1)
 	s.evictIfNeededLocked(shard)
+	// New cold insert — make sure any prior (now stale) hot copy is
+	// gone. The hot tier will be re-populated on the next GetReady
+	// hit, so we don't eagerly write here.
+	if s.hot.Enabled() {
+		s.hot.Invalidate(key)
+	}
 }
 
 func (s *Store) Snapshot(key string) (Entry, bool) {
@@ -341,6 +563,75 @@ func (s *Store) evictIfNeededLocked(shard *shard) {
 	}
 }
 
+// PruneExpired walks at most `maxScanPerShard` entries per shard starting
+// from a per-shard cursor and removes any whose TTL has elapsed (using
+// the same isExpired rule as GetReady). Returns the total number of
+// entries removed across all shards.
+//
+// This is the step-18 amortized prune: instead of taking each shard's
+// write lock for the full scan that SaveToFile / a TTL-walk loop would
+// do, we cap the per-call work at maxScanPerShard * shardCount entries.
+// Callers should invoke it periodically (e.g. once per pruneInterval)
+// from a background goroutine. maxScanPerShard <= 0 falls back to 32,
+// which keeps the worst-case lock hold per shard bounded to ~32 map
+// operations even on a 50k-record cache.
+//
+// Pending entries are skipped — they have their own pendingTimeout
+// reaper (ClearPending) and are not subject to cacheTTL.
+//
+// Concurrency: each shard's prune is independent and takes that
+// shard's write lock. The hot tier is invalidated via removeElementLocked,
+// which is already shared with normal eviction. Safe to call
+// concurrently with GetReady/SetReady/LookupOrCreatePending — they all
+// serialise on the same per-shard mutex.
+func (s *Store) PruneExpired(now time.Time, maxScanPerShard int) int {
+	if s == nil {
+		return 0
+	}
+	if maxScanPerShard <= 0 {
+		maxScanPerShard = 32
+	}
+	removed := 0
+	for i := 0; i < shardCount; i++ {
+		shard := &s.shards[i]
+		shard.mu.Lock()
+		// Resume from where we left off last time. The cursor is a
+		// simple count from order.Front() — list.Element pointers are
+		// not stable across concurrent mutations, so we re-walk from
+		// the front and skip ahead. This keeps the implementation
+		// trivially correct under concurrent Put/Get; the only cost
+		// is an O(cursor) skip, which is bounded by len(shard.items).
+		start := s.pruneCursor[i]
+		if start >= len(shard.items) {
+			start = 0
+		}
+		element := shard.order.Front()
+		for j := 0; j < start && element != nil; j++ {
+			element = element.Next()
+		}
+		scanned := 0
+		for element != nil && scanned < maxScanPerShard {
+			scanned++
+			next := element.Next()
+			node := element.Value.(*cacheNode)
+			if node.entry.Status != StatusPending && s.isExpired(&node.entry, now) {
+				s.removeElementLocked(shard, element)
+				removed++
+			}
+			element = next
+		}
+		// Advance the cursor. If we hit the tail, wrap back to 0 next
+		// time so we never get stuck at the end of a long list.
+		if element == nil {
+			s.pruneCursor[i] = 0
+		} else {
+			s.pruneCursor[i] = start + scanned
+		}
+		shard.mu.Unlock()
+	}
+	return removed
+}
+
 func (s *Store) removeElementLocked(shard *shard, element *list.Element) {
 	if element == nil {
 		return
@@ -351,9 +642,20 @@ func (s *Store) removeElementLocked(shard *shard, element *list.Element) {
 			s.pendingTotal.Add(^uint64(0)) // Decrement
 		}
 	}
+	key := node.key
 	delete(shard.items, node.key)
 	shard.order.Remove(element)
 	s.dirty.Add(1)
+	// Step 18 — when a cold entry leaves the cold tier (expiry,
+	// eviction, ClearPending, etc.) the hot copy is now serving a key
+	// that no longer exists in the cold tier. Drop it so the next
+	// lookup misses cleanly and goes back to the upstream resolver.
+	// The Invalidate call takes the hot mutex briefly; doing it while
+	// holding the shard mutex is fine because hot.Invalidate never
+	// re-acquires a shard mutex (no lock-order cycle).
+	if s.hot.Enabled() {
+		s.hot.Invalidate(key)
+	}
 }
 
 const (
