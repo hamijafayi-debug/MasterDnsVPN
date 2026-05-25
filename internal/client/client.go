@@ -58,6 +58,10 @@ type Client struct {
 	mtuProbeCounter                       atomic.Uint32
 	mtuTestRetries                        int
 	mtuTestTimeout                        time.Duration
+	// Step 14 — MTU discovery convergence knobs.
+	mtuProbeAggressive                    bool
+	mtuProbeRetryBackoff                  time.Duration
+	mtuProbeGapPrune                      int
 	mtuSaveToFile                         bool
 	mtuServersFileName                    string
 	mtuServersFileFormat                  string
@@ -263,6 +267,11 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		resolverAddrCache:                     make(map[string]*net.UDPAddr),
 		mtuTestRetries:                        cfg.MTUTestRetries,
 		mtuTestTimeout:                        time.Duration(cfg.MTUTestTimeout * float64(time.Second)),
+		// Step 14 — copy the convergence knobs onto the client. They are
+		// read-only after construction; no locking needed on the hot path.
+		mtuProbeAggressive:                    cfg.MTUProbeAggressive,
+		mtuProbeRetryBackoff:                  time.Duration(cfg.MTUProbeRetryBackoffMS) * time.Millisecond,
+		mtuProbeGapPrune:                      cfg.MTUProbeGapPruneBytes,
 		mtuSaveToFile:                         cfg.SaveMTUServersToFile,
 		mtuServersFileName:                    cfg.MTUServersFileName,
 		mtuServersFileFormat:                  cfg.MTUServersFileFormat,

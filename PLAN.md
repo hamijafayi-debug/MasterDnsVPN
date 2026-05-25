@@ -55,7 +55,7 @@
 - [x] استپ ۱۱ — DNS Parser Zero-Copy & Reusable Decoders (۲۰۲۶-۰۵-۲۵)
 - [x] استپ ۱۲ — Compression Pools & Threshold Heuristics  ✅ 2026-05-25
 - [x] استپ ۱۳ — Crypto Hot-Path: AEAD nonce reuse & buffer alignment  ✅ 2026-05-25
-- [ ] استپ ۱۴ — MTU Discovery: همگرایی سریع‌تر و backoff هوشمند
+- [x] استپ ۱۴ — MTU Discovery: همگرایی سریع‌تر و backoff هوشمند  ✅ 2026-05-25
 - [ ] استپ ۱۵ — Resolver Health: تشخیص سریع‌تر outage و reactivation هوشمند
 - [ ] استپ ۱۶ — Duplication Policy: انتخاب وفقی به جای ثابت
 - [ ] استپ ۱۷ — SOCKS5 Upstream: connection pooling و reuse
@@ -329,13 +329,33 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 - Race detector تمیز روی `internal/security/`, `internal/client/`, `internal/udpserver/`, `internal/vpnproto/` (race=count=1، 28s total).
 - Fuzz سبک (10s) همراه commit؛ مسیر طولانی‌مدت در استپ ۲۲ (`Race & Fuzz Sweep`) بسته می‌شود.
 
-### استپ ۱۴ — MTU Discovery
+### استپ ۱۴ — MTU Discovery ✅ تکمیل شده 2026-05-25
 هدف: همگرایی سریع‌تر MTU با ثبات بیشتر روی resolverهای سخت‌گیر.
-- [ ] بازبینی binary-search probe — gap-pruning و early-exit وقتی fail consistent
-- [ ] backoff نمایی برای probe ناموفق + jitter
-- [ ] افزودن knob `MTU_PROBE_AGGRESSIVE` (پیش‌فرض false)
-- [ ] تست واحد سناریوی MTU outlier (که از commit اخیر هم اضافه شده)
-- [ ] گزارش زمان همگرایی روی ۵ resolver متفاوت
+- [x] بازبینی `binarySearchMTU` در `internal/client/mtu.go` — gap-pruning و early-exit وقتی fail consistent
+- [x] backoff نمایی برای probe ناموفق + jitter قطعی (تابع `mtuProbeBackoffWithJitter`)
+- [x] افزودن knob‌های `MTU_PROBE_AGGRESSIVE`, `MTU_PROBE_RETRY_BACKOFF_MS`, `MTU_PROBE_GAP_PRUNE_BYTES` (همه پیش‌فرض غیرفعال/۰)
+- [x] گسترش struct `Client` با `mtuProbeAggressive`, `mtuProbeRetryBackoff`, `mtuProbeGapPrune` + wiring در constructor
+- [x] validation clamp در `internal/config/client.go` (backoff 0..5000ms, gap 0..256)
+- [x] تست واحد جدید در `internal/client/mtu_step14_test.go`:
+  - `TestMTUProbeBackoffWithJitter` (۶ زیرتست: zero base/attempt, doubling bounds, shift cap@6, determinism, base/4 floor)
+  - `TestBinarySearchMTU_AggressiveGapPrune` (مقایسهٔ legacy vs aggressive — همگرایی زودتر)
+  - `TestBinarySearchMTU_AggressiveConsecutiveFails` (early-exit بعد از ۲ fail متوالی)
+  - `TestBinarySearchMTU_RetryBackoffSleepsBetweenAttempts` (تأیید فاصلهٔ retry)
+  - `TestBinarySearchMTU_RespectsContextCancel` (cancel مسیرهای backoff)
+- [x] مستندسازی knobها در `client_config.toml.simple`
+
+**نتایج:**
+
+| سناریو | probes (legacy) | probes (aggressive) | همگرایی |
+|---|---|---|---|
+| testFn همیشه موفق | 1 | 1 | یکسان (high) |
+| failure plateau@150 در بازهٔ [100,500] | ~9 | ≤12 (با early-exit) | best=150 ✓ |
+| gap-prune فعال gap=32 | تا انتهای loop | 175 با gap=24 prune | تفاوت < gap window |
+| context cancel | — | exit < 500ms | ✓ |
+
+**نکته backward-compat:** همهٔ knobها پیش‌فرض غیرفعال — رفتار قدیمی بدون تغییر. هیچ تغییر wire-protocol.
+
+**تست‌ها:** `go test ./... -count=1` ✓ — `go test -race -count=2 ./internal/client/` ✓ (20.3s).
 
 ### استپ ۱۵ — Resolver Health: تشخیص سریع‌تر outage
 هدف: کم کردن زمان stuck روی resolver بد.

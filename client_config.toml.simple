@@ -219,6 +219,29 @@ MTU_TEST_RETRIES = 2
 MTU_TEST_TIMEOUT = 2.0
 MTU_TEST_PARALLELISM = 32
 
+# === Step 14: Aggressive MTU discovery convergence ===
+# When MTU_PROBE_AGGRESSIVE = true, the binary-search MTU discovery applies two
+# early-exit shortcuts on top of the standard binary search:
+#   * Gap pruning: once the remaining gap between left/right candidates is
+#     <= MTU_PROBE_GAP_PRUNE_BYTES AND at least one probe has succeeded,
+#     stop probing. Byte-precision MTU values rarely change real-world
+#     throughput because upstream layers align to power-of-two multiples.
+#   * Two-consecutive-failure early-exit: if two probes in a row fail above
+#     the current `best`, bail — this is a plateau signal and further
+#     probing wastes RTTs.
+# Recommended starting values: true / 16. Set to false for backwards-
+# compatible behaviour (every middle candidate gets probed).
+MTU_PROBE_AGGRESSIVE = false
+MTU_PROBE_GAP_PRUNE_BYTES = 0
+
+# Exponential backoff with deterministic jitter between probe retries.
+# 0 = legacy behaviour (immediate retry). When > 0, retry N waits roughly
+# base * 2^(N-1) ± 20% before re-probing the same candidate. The shift is
+# capped at 6 so retries never exceed base*64. Useful when probing through
+# congested resolvers where back-to-back retries amplify packet loss.
+# Range: 0..5000 ms.
+MTU_PROBE_RETRY_BACKOFF_MS = 0
+
 # Export successful MTU-tested resolvers to a file.
 SAVE_MTU_SERVERS_TO_FILE = false
 
