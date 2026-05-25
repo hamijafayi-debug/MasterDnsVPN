@@ -1052,12 +1052,26 @@ func (c *Client) binarySearchMTU(ctx context.Context, label string, minValue, ma
 		)
 	}
 
+	// Step 14: probe attempt loop with exponential backoff + jitter between
+	// retries. Backoff is opt-in via `mtuProbeRetryBackoff` (0 = legacy
+	// behaviour, immediate retry). When enabled, the wait for retry N is
+	// roughly  base * 2^(N-1)  with ±20% jitter so retries on different
+	// resolvers don't synchronise (which would amplify resolver overload
+	// during a network glitch).
 	check := func(value int) (bool, time.Duration) {
 		ok := false
 		var rtt time.Duration
 		for attempt := 0; attempt < c.mtuTestRetries; attempt++ {
 			if err := ctx.Err(); err != nil {
 				return false, 0
+			}
+			if attempt > 0 && c.mtuProbeRetryBackoff > 0 {
+				wait := mtuProbeBackoffWithJitter(c.mtuProbeRetryBackoff, attempt)
+				select {
+				case <-ctx.Done():
+					return false, 0
+				case <-time.After(wait):
+				}
 			}
 			passed, measuredRTT, err := testFn(value, attempt > 0)
 			if err != nil && c.log != nil && c.log.Enabled(logger.LevelDebug) {
@@ -1102,25 +1116,101 @@ func (c *Client) binarySearchMTU(ctx context.Context, label string, minValue, ma
 		bestRTT = rtt
 	}
 
+	// Step 14: aggressive-mode early-exits in the binary search loop.
+	//   * Gap pruning: when the remaining range (right-left) is below the
+	//     configured threshold AND we already have *any* successful probe
+	//     (best > low), stop polishing. The byte-precision MTU values that
+	//     remain rarely change real-world throughput because every layer
+	//     above us aligns to power-of-two multiples.
+	//   * Consecutive-failure early-exit: if two probes in a row fail while
+	//     we're in the upper half of the range (mid >= best + gap), bail —
+	//     this is a strong signal that there's a plateau and continuing
+	//     wastes RTTs without raising `best`.
+	gapPrune := c.mtuProbeGapPrune
+	aggressive := c.mtuProbeAggressive
+	consecutiveFails := 0
+
 	left := low + 1
 	right := high - 1
 	for left <= right {
 		if err := ctx.Err(); err != nil {
 			return 0, 0
 		}
+		// Aggressive gap pruning: when we already have at least one success
+		// and the remaining gap is small, declare convergence.
+		if aggressive && gapPrune > 0 && best > low && (right-left+1) <= gapPrune {
+			if c.log != nil && c.log.Enabled(logger.LevelDebug) {
+				c.log.Debugf(
+					"<cyan>[MTU]</cyan> Gap-pruned at %s: best=%d, remaining gap=%d (<= %d).",
+					label, best, right-left+1, gapPrune,
+				)
+			}
+			break
+		}
 		mid := (left + right) / 2
 		if ok, rtt := check(mid); ok {
 			best = mid
 			bestRTT = rtt
 			left = mid + 1
+			consecutiveFails = 0
 		} else {
 			right = mid - 1
+			consecutiveFails++
+			// Aggressive consecutive-fail early exit: after two failures in a
+			// row above `best`, assume we've crossed a plateau and the
+			// remaining lower half doesn't change `best` (since we'd only
+			// raise best on a *success*, and lower-half successes don't
+			// improve over the current best).
+			if aggressive && consecutiveFails >= 2 && right < best+max(1, gapPrune) {
+				if c.log != nil && c.log.Enabled(logger.LevelDebug) {
+					c.log.Debugf(
+						"<cyan>[MTU]</cyan> Early-exit at %s after 2 consecutive failures (best=%d, right=%d).",
+						label, best, right,
+					)
+				}
+				break
+			}
 		}
 	}
 	if c.log != nil && c.log.Enabled(logger.LevelDebug) {
 		c.log.Debugf("<cyan>[MTU]</cyan> Binary search result: %d", best)
 	}
 	return best, bestRTT
+}
+
+// mtuProbeBackoffWithJitter returns the wait time for the N-th retry given a
+// base duration. The formula is base * 2^(attempt-1) with ±20% jitter applied
+// deterministically by mixing the attempt index into the jitter seed (so the
+// math is repeatable in tests without an explicit RNG).
+//
+// Pure function so we can unit-test it in isolation; lives in mtu.go to keep
+// the dependency surface flat (no extra file just for one helper).
+func mtuProbeBackoffWithJitter(base time.Duration, attempt int) time.Duration {
+	if base <= 0 || attempt <= 0 {
+		return 0
+	}
+	// Cap the doubling so an aggressive operator can't accidentally produce
+	// minutes-long waits on retry 10+.
+	shift := attempt - 1
+	if shift > 6 {
+		shift = 6
+	}
+	wait := base << shift
+	// Deterministic jitter: derive a small offset in [-base/5, +base/5] from
+	// the attempt number using a cheap mixing function. This is *not*
+	// cryptographic — we just want different attempts on the same probe to
+	// land on slightly different boundaries to avoid synchronised retries.
+	jitterRange := int64(base) / 5
+	if jitterRange == 0 {
+		return wait
+	}
+	mix := int64(attempt)*int64(0x9E3779B1) ^ int64(base)
+	jitter := time.Duration(mix%(2*jitterRange) - jitterRange)
+	wait += jitter
+	if wait < base/4 {
+		wait = base / 4
+	}
+	return wait
 }
 
 func (c *Client) sendUploadMTUProbe(ctx context.Context, conn Connection, probeTransport *udpQueryTransport, mtuSize int, timeout time.Duration, options mtuProbeOptions) (bool, time.Duration, error) {

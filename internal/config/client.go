@@ -67,6 +67,20 @@ type ClientConfig struct {
 	MTUTestRetries                        int               `toml:"MTU_TEST_RETRIES"`
 	MTUTestTimeout                        float64           `toml:"MTU_TEST_TIMEOUT"`
 	MTUTestParallelism                    int               `toml:"MTU_TEST_PARALLELISM"`
+	// Step 14 — MTU discovery tuning.
+	//   * MTUProbeAggressive: when true, the binary search exits as soon as
+	//     the remaining range is below MTUProbeGapPruneBytes (default 32)
+	//     instead of polishing every byte. Saves 1-3 round-trips per resolver
+	//     on networks where 1-byte precision isn't useful.
+	//   * MTUProbeRetryBackoffMS: base wait between probe retries (ms).
+	//     Each retry waits backoff*2^(attempt-1) plus ±20% jitter so failing
+	//     probes don't hammer the resolver and don't synchronise across
+	//     parallel workers.
+	//   * MTUProbeGapPruneBytes: the gap threshold mentioned above. 0 keeps
+	//     legacy 1-byte precision; recommended value is 16-32.
+	MTUProbeAggressive                    bool              `toml:"MTU_PROBE_AGGRESSIVE"`
+	MTUProbeRetryBackoffMS                int               `toml:"MTU_PROBE_RETRY_BACKOFF_MS"`
+	MTUProbeGapPruneBytes                 int               `toml:"MTU_PROBE_GAP_PRUNE_BYTES"`
 	RX_TX_Workers                         int               `toml:"RX_TX_WORKERS"`
 	LegacyTunnelReaderWorkers             int               `toml:"TUNNEL_READER_WORKERS"`
 	LegacyTunnelWriterWorkers             int               `toml:"TUNNEL_WRITER_WORKERS"`
@@ -175,6 +189,13 @@ func defaultClientConfig() ClientConfig {
 		MTUTestRetries:                        2,
 		MTUTestTimeout:                        2.0,
 		MTUTestParallelism:                    16,
+		// Step 14 — defaults preserve legacy MTU discovery behaviour. Operators
+		// who want faster initial convergence flip MTUProbeAggressive=true and
+		// raise MTUProbeGapPruneBytes (16-32 typical) for a 1-3 round-trip win
+		// per resolver. RetryBackoff applies whether aggressive is on or off.
+		MTUProbeAggressive:                    false,
+		MTUProbeRetryBackoffMS:                0,
+		MTUProbeGapPruneBytes:                 0,
 		RX_TX_Workers:                         4,
 		TunnelProcessWorkers:                  0,
 		TunnelPacketTimeoutSec:                10.0,
@@ -451,6 +472,24 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.MTUTestRetries = defaultIntBelow(cfg.MTUTestRetries, 1, 1)
 	cfg.MTUTestTimeout = defaultFloatAtMostZero(cfg.MTUTestTimeout, 2.0)
 	cfg.MTUTestParallelism = defaultIntBelow(cfg.MTUTestParallelism, 1, 1)
+
+	// Step 14 — clamp the new MTU discovery knobs.
+	//   * RetryBackoff: 0..5000ms. Practical sweet spot is 50-300ms; values
+	//     above 5s are almost certainly a typo and would tank discovery time.
+	//   * GapPruneBytes: 0..256. Above 256 the search becomes useless;
+	//     0 disables pruning entirely (legacy behaviour).
+	if cfg.MTUProbeRetryBackoffMS < 0 {
+		cfg.MTUProbeRetryBackoffMS = 0
+	}
+	if cfg.MTUProbeRetryBackoffMS > 5000 {
+		cfg.MTUProbeRetryBackoffMS = 5000
+	}
+	if cfg.MTUProbeGapPruneBytes < 0 {
+		cfg.MTUProbeGapPruneBytes = 0
+	}
+	if cfg.MTUProbeGapPruneBytes > 256 {
+		cfg.MTUProbeGapPruneBytes = 256
+	}
 	legacyRX_TX_Workers := max(cfg.LegacyTunnelReaderWorkers, cfg.LegacyTunnelWriterWorkers)
 	if !cfg.explicitRX_TX_Workers && legacyRX_TX_Workers > 0 {
 		cfg.RX_TX_Workers = legacyRX_TX_Workers
