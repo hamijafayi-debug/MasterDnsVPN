@@ -1064,6 +1064,48 @@ sequenceDiagram
 
 ---
 
+## 🧪 بنچ‌مارک و محافظ رگرسیون CI
+
+این مخزن یک **محافظ رگرسیون عملکرد** خودکار دارد که از هر pull request در برابر کند شدن تصادفی hot-path محافظت می‌کند.
+
+### نصب (یک‌بار، نیاز به scope `workflow`)
+فایل workflow به‌صورت template در مسیر `scripts/benchregress/bench.yml.template` قرار دارد. برای فعال‌سازی، آن را به `.github/workflows/bench.yml` کپی و با PAT/account که `workflow` scope دارد commit کنید:
+```bash
+mkdir -p .github/workflows
+cp scripts/benchregress/bench.yml.template .github/workflows/bench.yml
+git add .github/workflows/bench.yml
+git commit -m "ci: enable bench regression workflow"
+git push
+```
+این جداسازی به این دلیل است که برخی GitHub App token‌ها مجوز ایجاد فایل workflow را ندارند.
+
+### Workflow (پس از نصب)
+- **فایل:** `.github/workflows/bench.yml` (کپی‌شده از template)
+- **trigger‌ها:**
+  - `pull_request` → بنچ‌مارک‌ها روی HEAD اجرا می‌شوند، با آخرین baseline مقایسه می‌شوند و یک گزارش markdown به‌صورت کامنت روی PR منتشر می‌شود. اگر هر بنچی بیشتر از threshold کند شده باشد، job فیل می‌کند.
+  - `push` به `main` → پس از merge، baseline جدید تولید و به branch جداگانه `bench-baseline` پوش می‌شود.
+  - `workflow_dispatch` → اجرای دستی با امکان تنظیم `threshold`، `benchtime`، `count`.
+- **threshold پیش‌فرض:** **۲۰٪** برای ns/op (انتخاب‌شده برای جذب noise در runner CI — local development باید روی ≤۱۰٪ هدف بگیرد).
+
+### اجزا
+- `scripts/benchregress/run_bench.sh` — اجرای `go test -bench` روی ۱۱ پکیج کلیدی (`arq`، `basecodec`، `client`، `compression`، `dnscache`، `dnsparser`، `logger`، `security`، `streamutil`، `udpserver`، `vpnproto`).
+- `scripts/benchregress/main.go` — ابزار Go بدون وابستگی که دو فایل خروجی بنچ را parse می‌کند، Δ% روی `ns/op` محاسبه می‌کند، جدول markdown می‌سازد و در صورت رگرسیون با exit code `1` خارج می‌شود.
+
+### استفاده محلی
+```bash
+# گرفتن snapshot baseline روی tree تمیز
+./scripts/benchregress/run_bench.sh baseline.txt 1s 1
+
+# پس از تغییرات، دوباره اجرا کن و مقایسه کن
+./scripts/benchregress/run_bench.sh current.txt 1s 1
+go run ./scripts/benchregress -baseline baseline.txt -current current.txt -threshold 10 -markdown report.md
+```
+
+### استراتژی ذخیره
+Baseline تاریخی در یک branch orphan با نام `bench-baseline` نگهداری می‌شود (auto-managed). تاریخچه main تمیز می‌ماند و PR‌ها همیشه با آخرین حالت merge‌شده مقایسه می‌شوند.
+
+---
+
 ## 🤝 مشارکت (Contributing)
 
 ما از تمام مشارکت‌ها استقبال می‌کنیم. لطفاً اگر ایده، باگ یا بهبود عملکردی دارید، از طریق Issue یا Pull Request آن را مطرح کنید.

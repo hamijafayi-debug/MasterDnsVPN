@@ -64,7 +64,8 @@
 - [x] استپ ۱۹ — Goroutine Audit & Lifecycle (نشت‌یاب) ✅ 2026-05-25
 - [x] استپ ۱۹.۵ — Fixture Lifecycle Refactor (رفع کامل ARQ-LIFECYCLE-1)  ✅ 2026-05-25 (اولویت بالا — رفع باگ از استپ ۱۹)
 - [x] استپ ۲۰ — Backpressure & Bounded Queues تمام لایه‌ها  ✅ 2026-05-25
-- [ ] استپ ۲۱ — CI Regression Bench (محافظ سرعت در PR‌ها)
+- [x] استپ ۲۱ — CI Regression Bench (محافظ سرعت در PR‌ها)  ✅ 2026-05-25
+- [ ] استپ ۲۱.۵ — رفع flaky test `TestDialExternalSOCKS5_PoolHitSkipsGreeting` (اولویت بالا — رفع باگ مشاهده‌شده در استپ ۲۱)
 - [ ] استپ ۲۲ — Race & Fuzz Sweep
 - [ ] استپ ۲۳ — Release Hardening (build flags, PGO, strip, GOAMD64)
 
@@ -571,15 +572,57 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 
 **اثرات production**: صفر تغییر behavioral در default deployment (`STREAM_QUEUE_OVERFLOW_POLICY` پیش‌فرض = `block`). knob جدید opt-in و wire-compatible (روی wire اثری ندارد چون پیامد سمت کلاینت است و ARQ retransmission packet‌های drop شده را در صورت data بودن recover می‌کند). roll-back با یک خط کانفیگ.
 
-### استپ ۲۱ — CI Regression Bench
+### استپ ۲۱ — CI Regression Bench ✅ (تکمیل‌شده — 2026-05-25)
+هدف: PR بد سرعت را زمین نزند — محافظت خودکار از hot-path‌ها در برابر رگرسیون عملکرد بدون نیاز به وابستگی خارجی (هیچ benchstat، هیچ third-party action).
 
-### استپ ۲۱ — CI Regression Bench
-هدف: PR بد سرعت را زمین نزند.
-- [ ] افزودن workflow جدید `bench.yml` که `go test -bench` روی پکیج‌های کلیدی اجرا و output را در PR کامنت کند
-- [ ] threshold check ساده (regression > 10% → fail)
-- [ ] حافظه نتایج تاریخی در branch جدا (artifacts) — سبک
-- [ ] مستندسازی در README
-- [ ] فعال‌سازی برای push روی main و PR
+- [x] **افزودن workflow template `scripts/benchregress/bench.yml.template`** که سه trigger دارد:
+  1. `pull_request` روی main — بنچ‌ها را اجرا، با baseline مقایسه، گزارش را به‌صورت کامنت روی PR منتشر، و در صورت رگرسیون job را fail می‌کند.
+  2. `push` به main — baseline جدید را تولید و در orphan branch `bench-baseline` ذخیره می‌کند.
+  3. `workflow_dispatch` — اجرای دستی با ورودی‌های threshold/benchtime/count.
+
+  **نکته نصب**: GitHub App token این agent مجوز `workflow` ندارد و نمی‌تواند مستقیماً فایل `.github/workflows/bench.yml` را ایجاد کند. بنابراین workflow به‌صورت template در `scripts/benchregress/bench.yml.template` تحویل داده می‌شود و مالک repo (با PAT دارای `workflow` scope) با یک `cp + commit + push` فعالش می‌کند. دستورالعمل کامل در README.MD و README_FA.MD آمده است. این عمدی است: template معتبر و آماده‌ی استفاده، نصب در دست انسان.
+
+- [x] **runner: `scripts/benchregress/run_bench.sh`** — اسکریپت bash که `go test -run='^$' -bench=. -benchmem` را روی ۱۱ پکیج کلیدی اجرا می‌کند (به ترتیب پایدار: arq, basecodec, client, compression, dnscache, dnsparser, logger, security, streamutil, udpserver, vpnproto). با header شامل تاریخ، نسخه Go، benchtime، count برای reproducibility. خطای یک پکیج کل run را شکست نمی‌دهد (`|| continue`).
+
+- [x] **compare tool: `scripts/benchregress/main.go`** — ابزار Go استانداردِ stdlib-only:
+  - پارس خط‌های `BenchmarkXxx-N iter ns ns/op B B/op allocs allocs/op` به‌طور regex-free.
+  - در صورت count>1، mean ساده روی samples حساب می‌شود (median/stddev در v2).
+  - چهار status: `regressed` (Δ% > threshold)، `improved` (Δ% < -threshold)، `added`، `removed`، `ok`.
+  - خروجی markdown با جدول مرتب‌شده (regressed اول، سپس added/removed، سپس improved).
+  - exit code `1` در صورت ≥۱ regression بالای threshold.
+  - flag‌ها: `-baseline`، `-current`، `-threshold` (پیش‌فرض ۱۰)، `-markdown` (مسیر خروجی)، `-fail-on-regression`.
+
+- [x] **threshold پیش‌فرض ۲۰٪ در CI** — تصمیم آگاهانه برای جذب noise در GitHub runner. اعتبارسنجی محلی: دو ران پشت‌سرهم با benchtime=200ms روی `BenchmarkParseDNSRequestLiteShort` تا ۵۵٪ drift نشان دادند که در runner بزرگ‌تر با count>=3 کاهش می‌یابد ولی هنوز کاملاً صفر نمی‌شود. این threshold قابل بازنگری در v2 با benchstat/CSV است.
+
+- [x] **حافظه تاریخی در orphan branch `bench-baseline`** — استراتژی سبک:
+  - تاریخچه main تمیز می‌ماند (هیچ baseline.txt در tree اصلی commit نمی‌شود).
+  - بعد از merge هر PR، job `update-baseline` فقط روی push به main اجرا می‌شود و یک bench run جدید را به فایل `bench-baseline.txt` در orphan branch می‌فرستد.
+  - PR‌های آینده با `git fetch origin bench-baseline:bench-baseline` این فایل را بازیابی می‌کنند.
+  - **first-run mode**: اگر branch وجود نداشته باشد، current.txt به‌عنوان baseline استفاده می‌شود (Δ=0، always pass) تا اولین push به main بتواند baseline را seed کند.
+
+- [x] **PR comment idempotent** — از `actions/github-script@v7` استفاده می‌شود. اگر کامنت قبلی این bot موجود باشد، آپدیت می‌شود؛ در غیر این صورت ایجاد می‌شود. این از پر شدن PR با کامنت‌های تکراری بعد از rebase/force-push جلوگیری می‌کند.
+
+- [x] **artifact upload** — `current.txt`، `baseline.txt`، `bench-report.md` و log به‌صورت artifact با retention ۳۰ روز آپلود می‌شوند. این برای debug و audit تاریخی مفید است.
+
+- [x] **مستندسازی در `README.MD` و `README_FA.MD`** — section "🧪 Benchmarks & Regression Guard (CI)" / "🧪 بنچ‌مارک و محافظ رگرسیون CI" با راهنمای استفاده محلی، فرمت دستور `go run ./scripts/benchregress -baseline ... -current ...`، و توضیح استراتژی orphan branch.
+
+**اعتبارسنجی نهایی**:
+- ✅ `go build ./scripts/benchregress/...` (binary 2.3MB)
+- ✅ تست synthetic با regression صنعتی ۲۰٪ → exit 1 با pinpoint کردن `BenchmarkDebugfDisabled` بود.
+- ✅ تست synthetic بدون regression → exit 0.
+- ✅ integration test محلی: ۲ ران بنچ پشت‌سرهم روی ۳ پکیج (logger, dnsparser, basecodec) → ۹ بنچ پارس‌شده، diff‌ها در محدوده ±۱۰٪ به‌جز یک outlier (basecodec) که خارج از scope این استپ است.
+- ✅ هیچ تغییری در کد production: workflow و scripts/ تنها افزایش‌اند.
+
+**اثرات production**: صفر. این صرفاً ابزار CI است که از regression جلوگیری می‌کند و روی wire protocol یا runtime client/server هیچ اثری ندارد. roll-back با حذف workflow file.
+
+### استپ ۲۱.۵ — رفع flaky test `TestDialExternalSOCKS5_PoolHitSkipsGreeting` (اولویت بالا)
+هدف: بازیابی پاس قطعی `go test -race -count=3 ./...` بدون env override، بدون تغییر کد production.
+- [ ] reproduce تحت بار scheduler (`-race -count=1 ./...` در یک ران ترکیبی، یا فقط `-race -p 4 ./internal/client/... ./internal/udpserver/...`)
+- [ ] تحلیل دقیق pool-hit detection: کدام goroutine می‌بایست stable greetings counter را check کند، چه intervalی برای polling مناسب است
+- [ ] افزایش مدت polling/wait در تست (بدون تغییر کد production) یا تبدیل polling به sync notify
+- [ ] افزودن assert deterministic از طریق `t.Cleanup` که post-condition را تأیید کند
+- [ ] اعتبارسنجی `-race -count=3 ./...` در tree تمیز
+- [ ] ثبت در bug ledger با وضعیت ✅
 
 ### استپ ۲۲ — Race & Fuzz Sweep
 هدف: شکار باگ‌های پنهان قبل از prod.
@@ -612,6 +655,7 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 - **[Step 7 / NEW / TEST-only / cross-test flaky]** ✅ **resolved در Step 18.5** — `TestARQ_GracefulCloseWriteFailureStillRechecksCloseReadCompletion`. ریشه: همان (cross-test GC/scheduler pressure ناشی از goroutineهای ARQ که بعد از Force-close packet push می‌کردند). با guard `closed/rstReceived/rstSent` در processReceivedData رفع شد.
 - **[Step 7 / NEW / TEST-only / cross-test flaky]** ✅ **resolved در Step 18.5** — `TestCleanupClosedSessionClosesStreamsAndClearsQueues`. **ریشه‌یابی واقعی**: در `internal/arq/arq.go` تابع `processReceivedData` (rxLoop async)، حتی پس از `Close(Force)` و `closed=true`، یک `PACKET_STREAM_DATA_ACK` به `enqueuer.PushTXPacket` می‌فرستاد. این ACK پس از `ClearTXQueue()` می‌رسید و TX queue را با size=1 ترک می‌کرد. fix: guard اول تابع که اگر `a.closed || a.rstReceived || a.rstSent` بود، payload را به pool برمی‌گرداند و بدون ACK خروج می‌کند. علاوه بر این `closeAllStreams` در `session.go` قبل از `finalizeAfterARQClose` با `WaitForShutdown(2s)` صبر می‌کند تا rxLoop به‌طور deterministic بسته شود. تأیید: 3×کامل full-suite + 8×20 stress targeted بدون FAIL.
 - **[ARQ-LIFECYCLE-1 / Step 19 / TEST-only / preexisting fixture leak]** ✅ **resolved در Step 19.5** — refactor کامل fixture-ها در سه پکیج: `internal/arq` با helper `newTestARQ(tb, ...)` (75 سایت migrate)، `internal/client/async_runtime_test.go` با `t.Cleanup` انفرادی، و `internal/udpserver` با refactor `newTestSessionRecord(tb, ...)` که `registerSessionRecordCleanup` را روی stream map پیوست می‌کند (43 سایت migrate). سه helper `leakDetectorSkipUnderCount` به `return false` پیش‌فرض تبدیل شدند. **تأیید: `go test -race -count=3 ./...` بدون هیچ env override کاملاً پاس می‌شود و leak detector روی هر invocation فعال است.**
+- **[Step 21 / TEST-only / flaky / preexisting from Step 17]** 🔍 **مشاهده‌شده، نیاز به رفع جداگانه** — `TestDialExternalSOCKS5_PoolHitSkipsGreeting` در `internal/udpserver/socks5_pool_step17_test.go` در یک ران count=1 (پس از تست‌های سنگین `internal/client` در همان فرآیند) فیل کرد با پیام `expected greetings stable at 0, got 1`. تأیید flaky بودن: ران مستقل با `-count=5` پاس، ران مستقل پکیج با `-count=3` پاس. ریشه احتمالی: pool-hit detection به polling کوتاه متکی است و در محیطی که goroutine scheduler تحت فشار است (race detector + سایر تست‌های parallel) timing race ایجاد می‌کند. **scope این استپ نبود** (Step 21 فقط `scripts/benchregress` و `.github/workflows/bench.yml` را اضافه می‌کند، هیچ کد production تغییر نکرده است). به‌عنوان bug ثبت و در یک استپ جداگانه باید رفع شود (مشابه الگوی Step 6 و Step 18.5 برای flaky‌های preexisting).
 
 ---
 
