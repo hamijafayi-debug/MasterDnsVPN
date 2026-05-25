@@ -931,8 +931,10 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr, localAddr s
 		return
 	}
 
-	// 4. Dispatch to Packet Handlers via Registry
-	if err := handlers.Dispatch(c, vpnPacket, addr); err != nil {
+	// 4. Dispatch to Packet Handlers via Registry. The Debugf is in a
+	// per-inbound-packet hot path; guard the err.Error() boxing so it is
+	// only paid when debug logging is enabled (step 3).
+	if err := handlers.Dispatch(c, vpnPacket, addr); err != nil && c.log.DebugEnabled() {
 		c.log.Debugf("\U0001F6A8 <red>Handler execution failed: %v</red>", err)
 	}
 

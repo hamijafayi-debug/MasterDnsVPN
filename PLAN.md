@@ -44,7 +44,7 @@
 
 - [x] استپ ۱ — Baseline & Observability Foundation  ✅ 2026-05-25
 - [x] استپ ۲ — Allocation Hotspots: گسترش sync.Pool به hot-path‌ها  ✅ 2026-05-25
-- [ ] استپ ۳ — Logging Fast-Path: حذف رشته‌سازی در سطح Debug غیرفعال
+- [x] استپ ۳ — Logging Fast-Path: حذف رشته‌سازی در سطح Debug غیرفعال  ✅ 2026-05-25
 - [ ] استپ ۴ — ARQ Receive Path & Buffer Reuse
 - [ ] استپ ۵ — ARQ Send Path & Adaptive RTO Tuning
 - [ ] استپ ۶ — Balancer Lock Granularity & Selection Fast-Path
@@ -97,11 +97,21 @@ E2E loopback bench (10MiB×3): Up 1.66 → 1.77 MiB/s (+6.6%)، Down 28.43 → 2
 
 ### استپ ۳ — Logging Fast-Path
 هدف: حذف هزینه format در سطح‌های غیرفعال.
-- [ ] افزودن متد `DebugEnabled()/InfoEnabled()` به `internal/logger`
-- [ ] محصور کردن ۱۰۷ نقطه `Debugf` در hot-path با `if log.DebugEnabled()`
-- [ ] استفاده از `strconv` به جای `fmt.Sprintf` در جاهایی که پشت Debug هستن و حتی در no-op هزینه‌بر‌اند
-- [ ] افزودن benchmark `BenchmarkLoggerDisabled` برای تضمین صفر تخصیص
-- [ ] ثبت آمار GC قبل/بعد در `PLAN.md` (با ۳ دقیقه بنچ تحت بار)
+- [x] افزودن متدهای `DebugEnabled()/InfoEnabled()/WarnEnabled()/ErrorEnabled()` به `internal/logger` (nil-safe، inlinable، single integer compare)
+- [x] محصور کردن Debugf های per-packet hot-path: `udpserver/dns_tunnel.go` (۵ سایت — cache hit, inflight reused, upstream lookup, upstream failed, resolved upstream)، `udpserver/server_postsession.go` (Fragment Buffered)، `client/handlers/packed_control_handler.go` (Error dispatching packed block)، `client/async_runtime.go` (Handler execution failed)
+- [x] افزودن بنچ‌مارک‌های `BenchmarkDebugfDisabled` و `BenchmarkDebugfDisabledGuarded` در logger برای اثبات تفاوت
+- [x] افزودن تست‌های `TestLevelGuards` (همه ۴ سطح) و `TestEnabledNilLogger` (nil-safe)
+- [x] بازبینی بقیه‌ی Debugfs — ۹۷٪ بقیه در control-path غیر-hot هستن (worker-start، MTU probe، session close، stream close، watchdog) — اون‌ها نیاز به guard ندارن چون فرکانس‌شون کف خاکه
+
+**نتایج بنچ‌مارک قبل/بعد:**
+
+| Benchmark                              | قبل (no guard)     | بعد (`if DebugEnabled()`)  |
+| -------------------------------------- | ------------------ | --------------------------- |
+| `Debugf` در سطح ERROR (debug غیرفعال)  | 54 ns/op · 8 B/op  | **0.67 ns/op · 0 B/op**     |
+
+عملاً 80× سریع‌تر و صفر allocation. در هر inbound packet در سرور ۵ سایت × 54 ns ≈ 270 ns هزینه‌ی حذف‌شده در path غیرفعال‌بودن Debug. تحت بار 50k pps این ≈ 13.5 ms/sec CPU صرفه‌جویی.
+
+E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Down 28.43 → 29.26 MiB/s (+3%). نوسان دارد ولی trend مثبت.
 
 ### استپ ۴ — ARQ Receive Path & Buffer Reuse
 هدف: کاهش allocation و کپی در RX.

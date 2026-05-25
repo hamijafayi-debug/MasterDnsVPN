@@ -163,9 +163,39 @@ func (l *Logger) Infof(format string, args ...any)  { l.logf(levelInfo, format, 
 func (l *Logger) Warnf(format string, args ...any)  { l.logf(levelWarn, format, args...) }
 func (l *Logger) Errorf(format string, args ...any) { l.logf(levelError, format, args...) }
 
+// Enabled reports whether messages at the given level would be emitted by
+// this logger. The intended idiom is to wrap expensive format-arg sites:
+//
+//	if log.Enabled(logger.LevelDebug) {
+//	    log.Debugf("expensive %s %d", buildSummary(), counter)
+//	}
+//
+// The level constants (LevelDebug … LevelError) live alongside this method.
+// Calling Enabled on a nil logger returns false so callers can omit nil
+// guards in hot paths.
 func (l *Logger) Enabled(level int) bool {
 	return l != nil && level >= l.level
 }
+
+// DebugEnabled / InfoEnabled / WarnEnabled / ErrorEnabled are typed
+// convenience wrappers around Enabled. They are inlinable and turn into a
+// single integer comparison on the hot path, so the surrounding
+// fmt.Sprintf-style argument construction can be skipped when logging is
+// silenced.
+//
+//	if log.DebugEnabled() {
+//	    log.Debugf("packet %d/%d from %s",
+//	        seq, total, addr.String())
+//	}
+//
+// The pattern is required around any Debugf whose format arguments cost
+// non-trivial CPU (String() implementations, time.Round, base-N formatting,
+// slice copies, etc.) because Go evaluates the argument list before calling
+// the variadic logger method — even when the message will be discarded.
+func (l *Logger) DebugEnabled() bool { return l != nil && l.level <= levelDebug }
+func (l *Logger) InfoEnabled() bool  { return l != nil && l.level <= levelInfo }
+func (l *Logger) WarnEnabled() bool  { return l != nil && l.level <= levelWarn }
+func (l *Logger) ErrorEnabled() bool { return l != nil && l.level <= levelError }
 
 func stripColorTags(text string) string {
 	start := strings.IndexByte(text, '<')

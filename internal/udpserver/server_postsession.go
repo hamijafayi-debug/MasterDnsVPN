@@ -639,7 +639,9 @@ func (s *Server) handleDNSQueryRequest(vpnPacket VpnProto.Packet, sessionRecord 
 	}
 
 	if !ready {
-		if s.log != nil && totalFragments == 1 {
+		// Per-packet hot path: only build the format args when DEBUG is
+		// actually enabled (step 3).
+		if totalFragments == 1 && s.log.DebugEnabled() {
 			s.log.Debugf(
 				"\U0001F9E9 <green>Tunnel DNS Fragment Buffered</green> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Seq</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Frag</blue>: <cyan>%d/%d</cyan>",
 				vpnPacket.SessionID,

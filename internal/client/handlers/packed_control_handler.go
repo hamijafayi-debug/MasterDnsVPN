@@ -54,7 +54,9 @@ func handlePackedControlBlocks(c ClientContext, packet VpnProto.Packet, addr *ne
 			err = handleGenericPacket(c, innerPacket, addr)
 		}
 
-		if err != nil {
+		if err != nil && c.Log().DebugEnabled() {
+			// Per-packed-block hot path — guard the format-arg construction
+			// so the err.Error() etc. only run when debug is enabled (step 3).
 			c.Log().Debugf("Error dispatching packed block (Type %d, Stream %d): %v", pType, streamID, err)
 		}
 	}
