@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,18 @@ var (
 	optChunkSize    = flag.Int("chunk-size", 32*1024, "Chunk size for transfers")
 	optPrefaceBytes = flag.Int("preface-bytes", 0, "Bytes to skip before starting timer")
 	optLogJson      = flag.Bool("json", false, "Output results in JSON format")
+
+	// Step 23 — PGO collection: when enabled, spawn server+client with
+	// PPROF_ADDR set, scrape /debug/pprof/profile during each run, and
+	// merge the resulting samples into a default.pgo file under each
+	// main package directory. Defaults are off so the regular bench
+	// path is untouched.
+	optPgoCollect  = flag.Bool("pgo", false, "Collect CPU profiles from server+client into default.pgo (Step 23 PGO).")
+	optPgoOutDir   = flag.String("pgo-out", "", "Directory to write per-run CPU profiles (default: .bench/pgo).")
+	optPgoSeconds  = flag.Int("pgo-seconds", 0, "Override profile duration in seconds (default: based on payload size).")
+	optPgoServer   = flag.String("pgo-server-addr", "127.0.0.1:6061", "PPROF_ADDR for the server subprocess.")
+	optPgoClient   = flag.String("pgo-client-addr", "127.0.0.1:6060", "PPROF_ADDR for the client subprocess.")
+	optPgoMergeOut = flag.Bool("pgo-merge", true, "After all runs, merge profiles into cmd/{client,server}/default.pgo via 'go tool pprof'.")
 )
 
 const (
@@ -92,6 +105,16 @@ func main() {
 		}
 	}
 
+	if *optPgoCollect {
+		if *optPgoOutDir == "" {
+			*optPgoOutDir = filepath.Join(benchDir, "pgo")
+		}
+		if err := os.MkdirAll(*optPgoOutDir, 0755); err != nil {
+			log.Fatalf("Failed to create pgo-out dir: %v", err)
+		}
+		fmt.Printf("🧪 PGO collection enabled — profiles dir: %s\n", *optPgoOutDir)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -102,6 +125,12 @@ func main() {
 	downloadResults := runBenchmark(ctx, "download")
 
 	printSummary(exfilResults, downloadResults)
+
+	if *optPgoCollect && *optPgoMergeOut {
+		if err := mergePgoProfiles(*optPgoOutDir); err != nil {
+			fmt.Printf("⚠️  PGO merge failed: %v\n", err)
+		}
+	}
 }
 
 func runStandalone() {
@@ -231,6 +260,9 @@ func runOnce(ctx context.Context, direction string, runIndex int) (BenchResult, 
 	absServerBin, _ := filepath.Abs(filepath.Join(binDir, "server.exe"))
 	serverCmd := exec.Command(absServerBin, "--config", serverCfg)
 	serverCmd.Dir = filepath.Dir(serverCfg)
+	if *optPgoCollect {
+		serverCmd.Env = append(os.Environ(), "PPROF_ADDR="+*optPgoServer)
+	}
 	serverLog := &safeBuffer{}
 	serverCmd.Stdout = serverLog
 	serverCmd.Stderr = serverLog
@@ -307,6 +339,9 @@ func runOnce(ctx context.Context, direction string, runIndex int) (BenchResult, 
 
 	absClientBin, _ := filepath.Abs(filepath.Join(binDir, "client.exe"))
 	clientCmd := exec.Command(absClientBin, "--config", clientCfg)
+	if *optPgoCollect {
+		clientCmd.Env = append(os.Environ(), "PPROF_ADDR="+*optPgoClient)
+	}
 	clientLog := &safeBuffer{}
 	clientCmd.Stdout = clientLog
 	clientCmd.Stderr = clientLog
@@ -321,12 +356,62 @@ func runOnce(ctx context.Context, direction string, runIndex int) (BenchResult, 
 		return BenchResult{}, err
 	}
 
+	// PGO collection: start scraping CPU profiles from server+client
+	// in the background. The fetch is blocking on the remote endpoint
+	// for the full duration, so we kick it off right before the actual
+	// data transfer and join after.
+	var pgoWG sync.WaitGroup
+	if *optPgoCollect {
+		seconds := *optPgoSeconds
+		if seconds <= 0 {
+			// Heuristic: ~1s per ~3MiB on lossless loopback, clamp to
+			// [5, 30]. Override with -pgo-seconds.
+			seconds = (*payloadMiB / (3 * 1024 * 1024)) + 5
+			if seconds < 5 {
+				seconds = 5
+			}
+			if seconds > 30 {
+				seconds = 30
+			}
+		}
+		// Wait briefly for pprof endpoint to be ready, then fetch.
+		_ = waitForPprofReady(*optPgoServer, 5*time.Second)
+		_ = waitForPprofReady(*optPgoClient, 5*time.Second)
+		pgoWG.Add(2)
+		go func() {
+			defer pgoWG.Done()
+			outPath := filepath.Join(*optPgoOutDir, fmt.Sprintf("server-%s-run-%d.pprof", direction, runIndex))
+			if err := fetchPprofProfile(*optPgoServer, seconds, outPath); err != nil {
+				fmt.Printf("⚠️  PGO server fetch failed: %v\n", err)
+			}
+		}()
+		go func() {
+			defer pgoWG.Done()
+			outPath := filepath.Join(*optPgoOutDir, fmt.Sprintf("client-%s-run-%d.pprof", direction, runIndex))
+			if err := fetchPprofProfile(*optPgoClient, seconds, outPath); err != nil {
+				fmt.Printf("⚠️  PGO client fetch failed: %v\n", err)
+			}
+		}()
+	}
+
 	// 5. Connect and Transfer
 	clientMode := "send"
 	if direction == "download" {
 		clientMode = "recv"
 	}
 	res, err := RunClientWithResult(ctx, clientMode, fmt.Sprintf("127.0.0.1:%d", *clientPort), int64(*payloadMiB), *optChunkSize, *optPrefaceBytes)
+	if *optPgoCollect {
+		// Wait for both profile fetches to complete before tearing down
+		// the subprocesses. Capped so a broken pprof endpoint can't
+		// hang the bench.
+		done := make(chan struct{})
+		go func() { pgoWG.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(60 * time.Second):
+			fmt.Println("⚠️  PGO scrape timeout — proceeding anyway")
+		}
+	}
 	if err != nil {
 		return BenchResult{}, err
 	}
@@ -628,4 +713,126 @@ func transfer(ctx context.Context, mode string, conn net.Conn, totalBytes int64,
 		Bytes:   total,
 		MiBps:   (float64(total) / (1024 * 1024)) / elapsed.Seconds(),
 	}, nil
+}
+
+// =============================================================================
+// Step 23 — PGO collection helpers
+// =============================================================================
+//
+// The bench harness can run end-to-end transfers against a real server/client
+// pair under PPROF_ADDR instrumentation. The helpers below scrape each
+// subprocess's CPU profile during the transfer and merge the resulting
+// samples into the canonical default.pgo file that `go build` auto-detects.
+
+// waitForPprofReady polls the /debug/pprof/ index until it responds 2xx or
+// the deadline expires. Returns nil on success, the last error otherwise.
+func waitForPprofReady(addr string, timeout time.Duration) error {
+	url := fmt.Sprintf("http://%s/debug/pprof/", addr)
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode < 400 {
+				return nil
+			}
+			lastErr = fmt.Errorf("http %d", resp.StatusCode)
+		} else {
+			lastErr = err
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("timeout")
+	}
+	return lastErr
+}
+
+// fetchPprofProfile downloads the CPU profile at /debug/pprof/profile from
+// the given address for `seconds` seconds and writes it to outPath.
+func fetchPprofProfile(addr string, seconds int, outPath string) error {
+	url := fmt.Sprintf("http://%s/debug/pprof/profile?seconds=%d", addr, seconds)
+	// The HTTP client deadline must outlive `seconds` plus some
+	// pprof teardown slack.
+	client := &http.Client{Timeout: time.Duration(seconds+15) * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("pprof %s returned %d", url, resp.StatusCode)
+	}
+	f, err := os.Create(outPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	n, err := io.Copy(f, resp.Body)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("📊 PGO sample: %s (%d bytes)\n", filepath.Base(outPath), n)
+	return nil
+}
+
+// mergePgoProfiles invokes `go tool pprof -proto -output ...` to fuse all
+// collected per-run profiles into cmd/client/default.pgo and
+// cmd/server/default.pgo. Profiles for client and server are merged
+// separately so each binary gets its own targeted optimization data.
+func mergePgoProfiles(profileDir string) error {
+	entries, err := os.ReadDir(profileDir)
+	if err != nil {
+		return err
+	}
+	var clientPros, serverPros []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		full := filepath.Join(profileDir, name)
+		switch {
+		case strings.HasPrefix(name, "client-") && strings.HasSuffix(name, ".pprof"):
+			clientPros = append(clientPros, full)
+		case strings.HasPrefix(name, "server-") && strings.HasSuffix(name, ".pprof"):
+			serverPros = append(serverPros, full)
+		}
+	}
+	if len(clientPros) == 0 && len(serverPros) == 0 {
+		return fmt.Errorf("no profiles found in %s", profileDir)
+	}
+
+	repoRoot, _ := filepath.Abs(".")
+	if err := mergeOne(clientPros, filepath.Join(repoRoot, "cmd", "client", "default.pgo")); err != nil {
+		return fmt.Errorf("client merge: %v", err)
+	}
+	if err := mergeOne(serverPros, filepath.Join(repoRoot, "cmd", "server", "default.pgo")); err != nil {
+		return fmt.Errorf("server merge: %v", err)
+	}
+	return nil
+}
+
+func mergeOne(profiles []string, outPath string) error {
+	if len(profiles) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+		return err
+	}
+	args := []string{"tool", "pprof", "-proto", "-output", outPath}
+	args = append(args, profiles...)
+	cmd := exec.Command("go", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	info, _ := os.Stat(outPath)
+	if info != nil {
+		fmt.Printf("✅ PGO merged: %s (%d bytes from %d profiles)\n", outPath, info.Size(), len(profiles))
+	}
+	return nil
 }

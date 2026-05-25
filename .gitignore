@@ -23,3 +23,9 @@ logs/
 build/
 .gocache
 .bench/
+bin/
+# Step 23 — local build artefacts; default.pgo files (under cmd/) are
+# intentionally checked in for auto-PGO and must NOT be ignored.
+/bench
+/masterdnsvpn-client*
+/masterdnsvpn-server*

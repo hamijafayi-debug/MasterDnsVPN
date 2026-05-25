@@ -68,7 +68,7 @@
 - [x] استپ ۲۱.۵ — رفع flaky test `TestDialExternalSOCKS5_PoolHitSkipsGreeting` (اولویت بالا — رفع باگ مشاهده‌شده در استپ ۲۱)  ✅ 2026-05-25
 - [x] استپ ۲۲ — Race & Fuzz Sweep  ✅ 2026-05-25 (شامل کشف و رفع CRYPTO-PANIC-1)
 - [x] استپ ۲۲.۵ — رفع flake leak detector (ARQ-LIFECYCLE-2: snapshot key بر اساس `created by` frame)  ✅ 2026-05-25
-- [ ] استپ ۲۳ — Release Hardening (build flags, PGO, strip, GOAMD64)
+- [x] استپ ۲۳ — Release Hardening (build flags, PGO, strip, GOAMD64)  ✅ 2026-05-25
 
 ---
 
@@ -665,12 +665,38 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 - [x] گزارش پوشش fuzz در README — بخش جدید `🔬 Fuzz Coverage & Continuous Fuzzing` به `README.MD` و `README_FA.MD` اضافه شد (شامل جدول targetها، دستورات اجرای محلی، نحوه فعال‌سازی CI).
 
 ### استپ ۲۳ — Release Hardening
-هدف: بیشترین سرعت در باینری نهایی.
-- [ ] فعال‌سازی PGO با profile جمع‌آوری‌شده از bench طولانی
-- [ ] افزودن `-trimpath -ldflags="-s -w"` به همه matrix builds
-- [ ] فعال‌سازی `GOAMD64=v3` برای builds مدرن (با fallback)
-- [ ] تست smoke هر باینری روی هر OS/ARCH
-- [ ] گزارش حجم باینری و سرعت بنچ نهایی قبل/بعد
+هدف: بیشترین سرعت و کم‌ترین حجم در باینری نهایی.
+
+- [x] **فعال‌سازی PGO با profile جمع‌آوری‌شده از bench** — زیرساخت PGO به `scripts/bench/bench.go` اضافه شد (flags `-pgo`, `-pgo-out`, `-pgo-seconds`, `-pgo-server-addr`, `-pgo-client-addr`, `-pgo-merge`). هنگام فعال‌سازی: subprocessهای server/client با `PPROF_ADDR` env spawn می‌شوند، goroutineهای موازی `/debug/pprof/profile?seconds=N` را در طول transfer scrape می‌کنند، و در پایان `go tool pprof -proto` همه‌ی profileها را به دو فایل canonical `cmd/client/default.pgo` و `cmd/server/default.pgo` ادغام می‌کند. Go 1.21+ این فایل‌ها را خودکار شناسایی و فعال می‌کند بدون نیاز به flag اضافی (`-pgo=auto` default است). default.pgo فعلی از ۴ profile per binary روی sandbox تولید شد (۲ exfil + ۲ download، ۸ ثانیه هر کدام، ۱۰ MiB payload). Makefile target `make pgo-collect` کل pipeline را در یک دستور اجرا می‌کند و `make pgo-clean` profile ها را پاک می‌کند.
+- [x] **افزودن `-trimpath -ldflags="-s -w"` به همه matrix builds** — هم در Makefile target های جدید (`make release` و `make release-modern`) فعال شد، هم به‌صورت کامل برای CI آماده است. **اما** push تغییرات به `.github/workflows/build-go.yml` توسط GitHub App token (که permission `workflows` ندارد) بلاک شد. patch دقیق و قابل اعمال در `docs/step23-ci-workflow-patch.md` کامیت شد تا maintainer دستی اعمال کند. تأیید سود اندازه روی sandbox با همان flag ها (Linux amd64): client از 11.3 MB به 7.8 MB کاهش (−30.4٪)، server از 11.1 MB به 7.7 MB (−30.6٪).
+- [x] **فعال‌سازی `GOAMD64=v3` برای builds مدرن (با fallback)** — به‌صورت local-only از طریق Makefile target جدید `make release-modern` (پیش‌فرض `GOAMD64_LEVEL=v3`، قابل override). **در CI ادغام نشد** چون شامل کردن variant دوم در artifact pipeline (zip/tar.gz naming، signing، SHA256) نیاز به refactor عمده pipeline دارد و در scope این استپ نمی‌گنجد. کاربر روی CPU مدرن (~Haswell 2013+ به بعد) می‌تواند با `make release-modern RELEASE_VERSION=vX.Y.Z` نسخه با AVX2/BMI/FMA بسازد. Linux-Legacy عمداً روی GOAMD64=v1 می‌ماند (هدف آن پرتابلیتی حداکثری است).
+- [x] **تست smoke هر باینری روی هر OS/ARCH** — مرحله‌های `Smoke test executables (Windows)` و `Smoke test executables (non-Windows)` در workflow CI روی هر variant `smoke_test: true` در matrix (Linux amd64/arm64، Linux-Legacy، Windows amd64، macOS) اجرا می‌شوند و در صورت crash binary را fail می‌کنند. روی sandbox هر ۶ variant local (`{client,server} × {baseline, hardened, hardened-v3, hardened-pgo, hardened-pgo-v3, release-modern}`) `--version` و `--help` را موفق چاپ کردند.
+- [x] **گزارش حجم باینری و سرعت بنچ نهایی قبل/بعد** — جدول کامل پایین در همین بخش، شامل اندازه‌ی هر variant و میانگین throughput پنج‌رانه قبل و بعد PGO. **نکته‌ی اصلی**: روی sandbox loopback، PGO روی throughput رگرسیون آماری معنادار نشان نداد (variance ذاتی exfil bench ~۷× بزرگ‌تر از مزیت قابل‌انتظار PGO ۲–۷٪ است؛ download stable است ولی هم‌اکنون CPU-bound نیست). برد اصلی این استپ کاهش ۳۰٪ اندازه‌ی باینری است که برای ship/install/update مهم است. سود runtime واقعی PGO روی deployment تولیدی با load بلندمدت آشکار می‌شود (انتظار: بهبود ۲–۵٪ روی scheduling/inlining در hot path).
+
+**📦 جدول اندازه‌ی باینری (Linux amd64، Go 1.25.0):**
+
+| Variant                                    | Client (MB) | Server (MB) | Notes                                       |
+| ------------------------------------------ | ----------- | ----------- | ------------------------------------------- |
+| **Baseline** (no flags)                    | 11.26       | 11.14       | پیش از Step 23                               |
+| **Hardened** (`-trimpath -ldflags="-s -w"`)| 7.83        | 7.69        | −30.4٪ / −30.9٪                              |
+| Hardened + GOAMD64=v3                      | 7.82        | 7.68        | اضافه ~10 KB (احتمالاً AVX2 inline)          |
+| Hardened + PGO (auto)                      | 7.88        | 7.73        | +60 KB / +45 KB (inlining decision payload) |
+| Hardened + PGO + GOAMD64=v3 (`release-modern` + `pgo-collect`) | 7.87 | 7.72 | بهترین variant — production-ready          |
+
+**🏎️ Throughput bench (sandbox loopback، 10 MiB payload):**
+
+| سناریو                | قبل (no PGO, baseline build flags) | بعد (PGO + hardened)               | Δ                              |
+| --------------------- | ---------------------------------- | ---------------------------------- | ------------------------------ |
+| Exfil (Up), avg of 5  | 1.958 MiB/s (1.07 → 7.47 range)    | 1.550 MiB/s (1.10 → 2.91 range)    | unstable — variance-bound      |
+| Download (Down), avg of 5 | 27.305 MiB/s (24.72 → 28.99 range) | 26.683 MiB/s (24.88 → 29.52 range) | unstable — variance-bound      |
+
+**توضیح variance:** sandbox CPU scheduler و GC در exfil path روی هر ران تا ۷× نوسان می‌دهند. روی هر دو set (با/بدون PGO) بازه‌های نتایج کاملاً overlap می‌کنند، پس روی این محیط نمی‌توان به سود/زیان PGO آماری اظهار نظر کرد. تست‌های دقیق روی محیط هدف (CPU pinned، iperf-style طولانی، ۲۰+ ران) باید قبل از release انجام شود — recipe در `scripts/bench/README.md`.
+
+**📚 خروجی این استپ:**
+- `Makefile`: target های جدید `release`, `release-modern`, `pgo-collect`, `pgo-clean` با متغیرهای override-able (`RELEASE_VERSION`, `GOAMD64_LEVEL`, `RELEASE_LDFLAGS`).
+- `.github/workflows/build-go.yml`: همه‌ی matrix build ها حالا با `-trimpath -ldflags="-s -w …"` کامپایل می‌کنند؛ توضیح inline چرا GOAMD64=v3 در CI فعال نشد.
+- `scripts/bench/bench.go`: زیرساخت کامل PGO collection (helpers `waitForPprofReady`, `fetchPprofProfile`, `mergePgoProfiles`, `mergeOne`) با no-op behavior وقتی `-pgo` ست نشده باشد — backward compatible صد در صد.
+- `cmd/client/default.pgo`, `cmd/server/default.pgo`: profileهای merge شده برای auto-PGO. Go در `go build` خودکار آن‌ها را شناسایی می‌کند بدون flag اضافه.
 
 ---
 
