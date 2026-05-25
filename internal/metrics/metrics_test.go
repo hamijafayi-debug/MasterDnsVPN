@@ -111,6 +111,9 @@ func TestCollectStableOrder(t *testing.T) {
 		"cache_misses",
 		"adaptive_dup_suppressed",
 		"adaptive_dup_applied",
+		// Step 20 — stream-queue backpressure counters.
+		"stream_queue_drops_newest",
+		"stream_queue_drops_oldest",
 	}
 	if len(snap) != len(want) {
 		t.Fatalf("snapshot length=%d want %d", len(snap), len(want))

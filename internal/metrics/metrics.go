@@ -149,6 +149,22 @@ var (
 	// often the policy is actually saving traffic vs. how often loss is
 	// high enough to need redundancy".
 	AdaptiveDupApplied = &Counter{}
+
+	// Step 20 — backpressure observability for the client-side
+	// stream-queue overflow policy. Both counters stay at zero under
+	// the default "block" policy (which preserves pre-Step-20
+	// behaviour). Increments here mean the operator opted into a drop
+	// policy and the queue saturated at least once.
+	//
+	// StreamQueueDropsNewest counts producer arrivals that found the
+	// planner / writer channel full and were discarded (drop-newest).
+	StreamQueueDropsNewest = &Counter{}
+
+	// StreamQueueDropsOldest counts queued tasks that were evicted to
+	// make room for a freshly arrived task (drop-oldest). Each
+	// increment represents one displaced packet — ARQ will retransmit
+	// it on the next RTO if it was a data segment.
+	StreamQueueDropsOldest = &Counter{}
 )
 
 func init() {
@@ -165,6 +181,8 @@ func init() {
 	register("masterdnsvpn_cache_misses", CacheMisses)
 	register("masterdnsvpn_adaptive_dup_suppressed", AdaptiveDupSuppressed)
 	register("masterdnsvpn_adaptive_dup_applied", AdaptiveDupApplied)
+	register("masterdnsvpn_stream_queue_drops_newest", StreamQueueDropsNewest)
+	register("masterdnsvpn_stream_queue_drops_oldest", StreamQueueDropsOldest)
 }
 
 // Snapshot captures every well-known counter at a single point in time. It is
@@ -194,5 +212,7 @@ func Collect() []Snapshot {
 		{"cache_misses", CacheMisses.Value()},
 		{"adaptive_dup_suppressed", AdaptiveDupSuppressed.Value()},
 		{"adaptive_dup_applied", AdaptiveDupApplied.Value()},
+		{"stream_queue_drops_newest", StreamQueueDropsNewest.Value()},
+		{"stream_queue_drops_oldest", StreamQueueDropsOldest.Value()},
 	}
 }

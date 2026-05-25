@@ -379,13 +379,22 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 			selected:  selected,
 		}
 
-		select {
-		case c.plannerQueue <- task:
-		case <-ctx.Done():
-			if !wasPacked && selected != nil {
-				selected.ReleaseTXPacket(item)
+		// Step 20 — honor STREAM_QUEUE_OVERFLOW_POLICY. Under "block"
+		// (default) this is bit-identical to the prior implementation:
+		// block on send, fall through on ctx.Done with a release.
+		// Under "drop-newest" / "drop-oldest" the producer never parks
+		// and the dropped/evicted task has its TX packet released so
+		// allocation accounting stays consistent.
+		if !c.dispatchPlannerTask(ctx, task) {
+			// Either ctx was cancelled or the policy chose to drop.
+			// dispatchPlannerTask already released the packet — we just
+			// need to honor a cancellation by returning from the
+			// dispatch loop so callers can shut down deterministically.
+			if ctx.Err() != nil {
+				return
 			}
-			return
+			// Drop-policy path: keep iterating; the burst will subside
+			// or another packet will succeed.
 		}
 	}
 }

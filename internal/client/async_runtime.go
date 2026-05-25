@@ -627,13 +627,16 @@ func (c *Client) asyncPlanEncodeWorker(ctx context.Context, id int) {
 				frames:    append([]encodedOutboundDatagram(nil), frames...),
 			}
 
-			select {
-			case c.encodedTXChannel <- encodedTask:
-			case <-ctx.Done():
-				if !task.wasPacked && task.selected != nil {
-					task.selected.ReleaseTXPacket(task.item)
+			// Step 20 — same backpressure policy as planner enqueue.
+			// Under "block" (default) this preserves prior semantics:
+			// park on send, release on ctx.Done. Under a drop policy
+			// the producer never parks and the dropped task's TX
+			// packet (if any) is released by dispatchWriterTask.
+			if !c.dispatchWriterTask(ctx, encodedTask) {
+				if ctx.Err() != nil {
+					return
 				}
-				return
+				// Drop-policy path: continue draining the planner queue.
 			}
 		}
 	}
