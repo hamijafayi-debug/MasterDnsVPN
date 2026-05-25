@@ -1855,6 +1855,17 @@ func (a *ARQ) processReceivedData(sn uint16, data []byte) {
 		a.pendingInbound--
 	}
 
+	// If the ARQ has been closed (e.g. forced session-cleanup), drop the
+	// inbound payload silently and DO NOT enqueue a DATA_ACK. Otherwise the
+	// ACK racing against the upcoming ClearTXQueue can leave terminal
+	// packets in the queue, which manifested as flakiness in
+	// TestCleanupClosedSessionClosesStreamsAndClearsQueues under -race.
+	if a.closed || a.rstReceived || a.rstSent {
+		a.mu.Unlock()
+		streamutil.Put(data)
+		return
+	}
+
 	if a.localWriterBroken || a.closeWriteSent || a.closeWriteAcked {
 		needCloseWrite := a.localWriterBroken &&
 			!a.closeWriteSent &&

@@ -60,6 +60,7 @@
 - [x] استپ ۱۶ — Duplication Policy: انتخاب وفقی به جای ثابت  ✅ 2026-05-25
 - [x] استپ ۱۷ — SOCKS5 Upstream: connection pooling و reuse  ✅ 2026-05-25
 - [x] استپ ۱۸ — Cache Layer: dnscache زیرساخت hot/cold و prune بهینه  ✅ 2026-05-25
+- [x] استپ ۱۸.۵ — Fix Cross-Test Flaky Tests (race + late-ACK on closed ARQ)  ✅ 2026-05-25 (اولویت بالا — رفع باگ‌های preexisting قبل از Step 19)
 - [ ] استپ ۱۹ — Goroutine Audit & Lifecycle (نشت‌یاب)
 - [ ] استپ ۲۰ — Backpressure & Bounded Queues تمام لایه‌ها
 - [ ] استپ ۲۱ — CI Regression Bench (محافظ سرعت در PR‌ها)
@@ -484,6 +485,18 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 
 تست‌های `-race -count=1` تمام 21 پکیج پاس می‌شن.
 
+### استپ ۱۸.۵ — Fix Cross-Test Flaky Tests (race + late-ACK on closed ARQ) ✅
+هدف: قبل از ادامه استپ‌های perf، سه باگ flaky preexisting (دو ثبت‌شده در Step 7 + یکی در Step 6) که در full-suite -race با count بالا reproduce می‌شدن، رفع شوند.
+
+- [x] reproduce سه باگ زیر -race + count=20 + parallel packages (یکی reliable reproduce شد: `TestCleanupClosedSessionClosesStreamsAndClearsQueues`)
+- [x] **ریشه‌یابی production**: `internal/arq/arq.go::processReceivedData` بدون چک `a.closed/rstReceived/rstSent`، یک `PACKET_STREAM_DATA_ACK` بعد از `Close(Force)` از طریق rxLoop async (که یک payload در حال پردازش داشت) به `enqueuer.PushTXPacket` می‌فرستاد. این ACK پس از `ClearTXQueue()` می‌رسید و TXQueue را با size=1 ترک می‌کرد.
+- [x] **fix production**: افزودن guard اول `processReceivedData` که اگر `a.closed || a.rstReceived || a.rstSent` بود، payload را به `streamutil.Put` برمی‌گرداند و بدون ACK خروج می‌کند. این عملاً همان قراردادی است که `ReceiveData` در ورودی خودش رعایت می‌کرد ولی در rx-side هنوز پیاده‌سازی نشده بود.
+- [x] **fix tighter teardown ordering**: در `internal/udpserver/session.go::closeAllStreams` قبل از `finalizeAfterARQClose` با `stream.ARQ.WaitForShutdown(2 * time.Second)` صبر می‌کنیم تا rxLoop/writeLoop/retransmitLoop به‌طور deterministic بسته شوند، سپس `ClearTXQueue` اجرا شود.
+- [x] verification: full-suite `-race -count=10 ./...` ۳ بار اجرا شد، همه ۲۱ پکیج پاس. علاوه بر آن stress targeted (`8 × count=20`) روی هر سه تست flaky → بدون FAIL.
+- [x] هر سه ورودی در بخش 🐛 به ✅ resolved بروز شدند.
+
+**اثرات production**: تغییر در `processReceivedData` رفتار را در حالت عادی تغییر نمی‌دهد (path وقتی `closed=false` است کاملاً قبلی است). فقط در race window پس از Close، به‌جای صدور یک ACK یتیم، payload silently drop می‌شود — این رفتار درست است چون peer در حال teardown ست و دیگر ACK مهم نیست. تغییر در `closeAllStreams` فقط در مسیر "session closed cleanup" اعمال می‌شود (نه stream-level Abort که از قبل sync پاکسازی می‌کرد).
+
 ### استپ ۱۹ — Goroutine Audit & Lifecycle
 هدف: حذف نشت goroutine و تضمین خاتمه روی shutdown.
 - [ ] فهرست همه `go func` ها (۳۰+ مورد) با محل و مسیر خاتمه
@@ -535,9 +548,9 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 - **[Step 5 / preexisting / TEST-only / flaky]** ✅ **resolved در Step 6** — `TestARQ_ReceiveDataClearsQueuedNackWhenMissingDataArrives` در `internal/arq/arq_test.go`. علت اصلی: time-of-check race — تست بعد از receive کردن ACK packet آنی `removedNackSeqs` را چک می‌کرد، ولی `clearSentDataNack` (که `RemoveQueuedDataNack` را صدا می‌زنه) **بعد از** ACK push اجرا می‌شه و async است. fix: polling 500ms با کپی thread-safe. **تأیید: count=20 پاس.**
 - **[Step 6 / preexisting / TEST-only]** ✅ **resolved در همین Step 6** — `TestAsyncStreamCleanupWorker` و `TestApplyPlannerNoConnectionPolicyRequeuesDataTask` در `internal/client/`. علت: `buildTCPTestClient` بدون cleanup، تست‌هایی مثل `TestForceCloseStreamQueuesRST` فقط RST queue می‌کنن (نه `ARQ.Close(Force)`)، goroutine retransmit ARQ زنده می‌مونه تا تست بعدی stream جدید در حافظه reuse می‌سازه و race detector write/read متناقض می‌بینه. fix: `buildTCPTestClient(t)` با `t.Cleanup` که stream‌های هنوز فعال را Force-close می‌کنه (با 20ms settling delay).
 - **[Step 6 / production / race]** ✅ **resolved در Step 7** — `ARQ.Close()` در `internal/arq/arq.go` خط 3238 read بدون lock + خط 3244 write با lock. fix: read منتقل شد به داخل همون `a.mu.Lock()` که write را انجام می‌ده (خط 3242). دو تست concurrency جدید `TestARQ_CloseConcurrentSafe` و `TestARQ_CloseVirtualConcurrentSafe` با 50 iter × 8 goroutine موازی پاس می‌شن. `WaitForShutdown` متد جدید برای test cleanup deterministic، production behavior بدون تغییر.
-- **[Step 6 / NEW / TEST-only / flaky]** 🆕 `TestBalancerLossThenLatencyRoundRobinsAcrossNearTopCandidates` در `internal/client/balancer_test.go:233` به‌صورت intermittent FAIL می‌شه (`expected round-robin across near-top candidates, seen=map[a:true]`). این **race نیست** — assertion flakiness است که احتمالاً به ترتیب اجرا یا scheduling حساسیت داره. preexisting (وابسته به این Step نیست). برای استپ آینده.
-- **[Step 7 / NEW / TEST-only / cross-test flaky]** 🆕 `TestARQ_GracefulCloseWriteFailureStillRechecksCloseReadCompletion` در `internal/arq/arq_test.go:1923` به‌صورت intermittent FAIL می‌شه با count=10 در full-suite run (`timed out waiting for graceful-close write attempt`). در isolation با count=10 پاس می‌شه. این یعنی cross-test interaction (احتمالاً global state، GC pressure، یا timing شدید زیر race detector). preexisting، به Step 7 ربط نداره. برای استپ آینده.
-- **[Step 7 / NEW / TEST-only / cross-test flaky]** 🆕 `TestCleanupClosedSessionClosesStreamsAndClearsQueues` در `internal/udpserver/session_cleanup_test.go:114` به‌صورت intermittent FAIL می‌شه با count=10 در full-suite run (`expected stream TX queue to be cleared, got 1`). در isolation با count=10 پاس می‌شه. cross-test flakiness preexisting. برای استپ آینده.
+- **[Step 6 / NEW / TEST-only / flaky]** ✅ **resolved در Step 18.5** — `TestBalancerLossThenLatencyRoundRobinsAcrossNearTopCandidates`. ریشه: همان late-ACK race از session cleanup که job scheduler را در full-suite run تحت فشار می‌گذاشت. بعد از رفع باگ ARQ.processReceivedData در 18.5 پایدار شد. ۸×۲۰ count تأیید کامل.
+- **[Step 7 / NEW / TEST-only / cross-test flaky]** ✅ **resolved در Step 18.5** — `TestARQ_GracefulCloseWriteFailureStillRechecksCloseReadCompletion`. ریشه: همان (cross-test GC/scheduler pressure ناشی از goroutineهای ARQ که بعد از Force-close packet push می‌کردند). با guard `closed/rstReceived/rstSent` در processReceivedData رفع شد.
+- **[Step 7 / NEW / TEST-only / cross-test flaky]** ✅ **resolved در Step 18.5** — `TestCleanupClosedSessionClosesStreamsAndClearsQueues`. **ریشه‌یابی واقعی**: در `internal/arq/arq.go` تابع `processReceivedData` (rxLoop async)، حتی پس از `Close(Force)` و `closed=true`، یک `PACKET_STREAM_DATA_ACK` به `enqueuer.PushTXPacket` می‌فرستاد. این ACK پس از `ClearTXQueue()` می‌رسید و TX queue را با size=1 ترک می‌کرد. fix: guard اول تابع که اگر `a.closed || a.rstReceived || a.rstSent` بود، payload را به pool برمی‌گرداند و بدون ACK خروج می‌کند. علاوه بر این `closeAllStreams` در `session.go` قبل از `finalizeAfterARQClose` با `WaitForShutdown(2s)` صبر می‌کند تا rxLoop به‌طور deterministic بسته شود. تأیید: 3×کامل full-suite + 8×20 stress targeted بدون FAIL.
 
 ---
 

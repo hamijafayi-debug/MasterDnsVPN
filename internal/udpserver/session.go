@@ -1079,6 +1079,19 @@ func (r *sessionRecord) closeAllStreams(reason string) {
 			stream.ARQ.Close(reason, arq.CloseOptions{Force: true})
 		}
 
+		// Wait briefly for ARQ goroutines to exit so they don't race with
+		// the TX-queue clear in finalizeAfterARQClose by pushing a final
+		// RST/FIN packet after ClearTXQueue has run. This was the root
+		// cause of intermittent failures in
+		// TestCleanupClosedSessionClosesStreamsAndClearsQueues observed
+		// under -race with high count under cross-test load: a forced
+		// ARQ.Close enqueues terminal packets asynchronously via the
+		// writeLoop, which could run *after* ClearTXQueue and leave the
+		// queue with size>0.
+		if stream.ARQ != nil {
+			stream.ARQ.WaitForShutdown(2 * time.Second)
+		}
+
 		stream.finalizeAfterARQClose(reason)
 	}
 
