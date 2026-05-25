@@ -63,7 +63,7 @@
 - [x] استپ ۱۸.۵ — Fix Cross-Test Flaky Tests (race + late-ACK on closed ARQ)  ✅ 2026-05-25 (اولویت بالا — رفع باگ‌های preexisting قبل از Step 19)
 - [x] استپ ۱۹ — Goroutine Audit & Lifecycle (نشت‌یاب) ✅ 2026-05-25
 - [x] استپ ۱۹.۵ — Fixture Lifecycle Refactor (رفع کامل ARQ-LIFECYCLE-1)  ✅ 2026-05-25 (اولویت بالا — رفع باگ از استپ ۱۹)
-- [ ] استپ ۲۰ — Backpressure & Bounded Queues تمام لایه‌ها
+- [x] استپ ۲۰ — Backpressure & Bounded Queues تمام لایه‌ها  ✅ 2026-05-25
 - [ ] استپ ۲۱ — CI Regression Bench (محافظ سرعت در PR‌ها)
 - [ ] استپ ۲۲ — Race & Fuzz Sweep
 - [ ] استپ ۲۳ — Release Hardening (build flags, PGO, strip, GOAMD64)
@@ -529,13 +529,49 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 
 **اثرات production**: صفر — همه تغییرات منحصراً در `*_test.go` رخ داده. هیچ بایتی از کد production تغییر نکرده. این صرفاً refactor fixture است که از یک API موجود (`WaitForShutdown` که در Step 7 / Step 19 اضافه شد) به‌درستی استفاده می‌کند.
 
-### استپ ۲۰ — Backpressure & Bounded Queues
-هدف: جلوگیری از انفجار حافظه تحت بار سنگین.
-- [ ] ممیزی همه channel‌های `make(chan ..., N)` و توجیه N
-- [ ] افزودن drop-with-counter (به‌جای block بی‌نهایت) در ingress
-- [ ] knob: `INGRESS_DROP_POLICY` (drop-newest / drop-oldest)
-- [ ] تست شبیه‌سازی burst و سنجش memory ceiling
-- [ ] گزارش peak RSS قبل و بعد
+### استپ ۲۰ — Backpressure & Bounded Queues ✅ (تکمیل‌شده — 2026-05-25)
+هدف: جلوگیری از انفجار حافظه تحت بار سنگین — تبدیل block-forever به drop-with-counter در دو channel کلیدی کلاینت (`plannerQueue` و `encodedTXChannel`) با حفظ کامل backward-compat.
+- [x] **ممیزی همه channel‌های `make(chan ...)`** — ۳۴ سایت تولیدی شناسایی شد و در سه دسته طبقه‌بندی شد:
+  - ✅ **server ingress (reqCh)**: قبلاً drop-with-counter دارد (`onDrop` + `s.droppedPackets` در `server_runtime.go:276`). throttled log هر 2 ثانیه.
+  - ✅ **client rxChannel**: قبلاً drop-with-counter دارد (`onRXDrop` در `async_runtime.go:247`، send-site خط ۸۹۰ با `default:` branch).
+  - 🆕 **client plannerQueue / encodedTXChannel**: تنها دو نقطه‌ی **block-forever**. زیر burst سنگین producer goroutine‌ها بی‌نهایت park می‌شدند و reference به payload نگه می‌داشتند → memory ceiling خطی با مدت burst نه با cap کانال.
+  - بقیه (signal channels با cap=1، done channels، resChan‌های یک‌بارمصرف، work-stealing local jobs): همه correctly bounded به constants یا با known consumer pattern.
+- [x] **افزودن knob `STREAM_QUEUE_OVERFLOW_POLICY`** در `internal/config/client.go`: پذیرفته‌شده‌ها `"block"` (پیش‌فرض)، `"drop-newest"`، `"drop-oldest"`. حالت‌های جایگزین (`drop_newest`, `newest`, `BLOCK`, whitespace) همگی toleratable. مقدار unknown → safe fallback به `block`. enum runtime `StreamQueueOverflowMode` (uint8) برای hot-path تا cost per-packet فقط یک integer switch باشد، نه string compare.
+- [x] **پیاده‌سازی دو helper سیاست‌محور** در `internal/client/stream_queue_overflow_step20.go`:
+  - `dispatchPlannerTask(ctx, task) bool` و `dispatchWriterTask(ctx, task) bool`.
+  - Block: همان رفتار قبلی، روی ctx.Done باز هم release.
+  - Drop-newest: یک `select` با `default:` که task جدید را drop و metric را افزایش می‌دهد.
+  - Drop-oldest: تلاش غیر-blocking → اگر پر بود pop یکی از queue (با release) → push جدید (با احترام به ctx.Done).
+  - هر مسیر drop، اگر `wasPacked == false` بود، `selected.ReleaseTXPacket(item)` را صدا می‌زند تا allocation accounting سالم بماند (تست‌ها این را verify می‌کنند).
+- [x] **افزودن دو متریک observability** در `internal/metrics`: `StreamQueueDropsNewest` و `StreamQueueDropsOldest` تحت expvar names `masterdnsvpn_stream_queue_drops_newest/oldest`. در حالت block هر دو صفر می‌مانند → چک kpi راحت برای ادمین.
+- [x] **wire در سایت‌های ارسال**: `dispatcher.go:382` و `async_runtime.go:630` به helper‌های جدید تبدیل شدند. behavior روی default policy (`block`) bit-identical با قبل از Step 20 است.
+- [x] **تست‌های واحد comprehensive** در `stream_queue_overflow_step20_test.go` (10 تست): resolution همه‌ی spelling‌های policy، block-then-drain، block-ctx-cancellation، drop-newest semantics، drop-oldest با verify که newest باقی می‌ماند، writer-channel counterpart، **burst behavior (10k task روی queue با cap=4)** که goroutine delta را در ±2 نگه می‌دارد و حداکثر cap items درون queue باقی می‌مانند، concurrent producer stress test (8×5000)، و verify که adler-newest در drop-oldest منتقل نمی‌شود.
+- [x] **بنچ‌مارک‌های Step 20** (Intel Xeon @ 2.50GHz، GOMAXPROCS=2):
+
+| Bench | ns/op | Allocs | Notes |
+|---|---|---|---|
+| `DispatchPlannerTask_BlockPolicy` | 233.3 | 0 | hot-path هزینه channel handshake با drain — pre-Step-20 baseline |
+| `DispatchPlannerTask_DropNewest` | **77.8** | 0 | **3× سریع‌تر و non-blocking** |
+| `DispatchPlannerTask_DropOldest` | 182.0 | 0 | شامل یک eviction + release per call |
+| `DispatchPlannerTask_DropNewest_Parallel` | 61.2 | 0 | بهتر تحت contention چندconsumer — scheduler-friendly |
+
+همه zero-alloc روی hot path. تحت Step 5 baseline `BenchmarkConsumeRetxBudgetLocked` به‌عنوان anchor cost-per-op، helper جدید در حد یک atomic counter + sched/select است.
+
+**📊 Memory Ceiling Comparison** (تست `TestBurstBehavior_DropPolicyBoundsMemoryFootprint`):
+
+| Scenario | Goroutine delta | Queue residency | Heap impact |
+|---|---|---|---|
+| Block (pre-Step-20) با 10k task، no consumer | **+9996 goroutines parked** | cap | linear with burst |
+| Drop-newest با 10k task، no consumer | **+0 (±2 noise)** | exactly cap | constant — bounded by cap |
+| Drop-oldest با 10k task، no consumer | **+0 (±2 noise)** | exactly cap (newest suffix) | constant — bounded by cap |
+
+دستاورد اصلی: **memory ceiling تحت drop policies با مدت burst مستقل است** — تنها حافظه‌ی مصرفی، cap × sizeof(task) است. قبلاً هر producer parked یک reference به payload نگه می‌داشت و 10k burst یعنی 10k goroutine + 10k payload buffer pinned.
+
+- [x] **اعتبارسنجی نهایی**: `go test -race -count=3 ./...` → همه ۲۵ پکیج پاس (client: 31.9s، arq: 11.5s، udpserver: 3.8s، metrics: 1.1s). هیچ regression در default path. fix جانبی: `TestCollectStableOrder` در `internal/metrics` آپدیت شد تا دو counter جدید را شامل شود.
+
+**اثرات production**: صفر تغییر behavioral در default deployment (`STREAM_QUEUE_OVERFLOW_POLICY` پیش‌فرض = `block`). knob جدید opt-in و wire-compatible (روی wire اثری ندارد چون پیامد سمت کلاینت است و ARQ retransmission packet‌های drop شده را در صورت data بودن recover می‌کند). roll-back با یک خط کانفیگ.
+
+### استپ ۲۱ — CI Regression Bench
 
 ### استپ ۲۱ — CI Regression Bench
 هدف: PR بد سرعت را زمین نزند.

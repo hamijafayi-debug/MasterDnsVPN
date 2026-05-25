@@ -163,6 +163,38 @@ type ClientConfig struct {
 	// for FastRetx, unlimited for RetxBudget.
 	ARQFastRetxThreshold                  int               `toml:"ARQ_FAST_RETX_THRESHOLD"`
 	ARQRetxBudgetPerSecond                int               `toml:"ARQ_RETX_BUDGET_PER_SECOND"`
+	// Step 20 — backpressure policy for the client-side planner /
+	// writer queues (`plannerQueue` and `encodedTXChannel`). These are
+	// the bounded channels that hold per-packet planner tasks and
+	// encoded outbound datagrams between the dispatcher, planner, and
+	// writer goroutines. Under sustained ingress bursts they can
+	// saturate, and the prior behaviour was to block the producer
+	// indefinitely (only ctx.Done could unwedge it). That preserved
+	// every packet but pinned upstream goroutines and the payload they
+	// referenced, creating a memory ceiling that scaled with burst
+	// duration rather than with channel capacity.
+	//
+	// Policy values:
+	//   ""           — same as "block" (default, fully backwards-
+	//                  compatible: producer waits until the consumer
+	//                  drains a slot).
+	//   "block"      — explicit form of the default; producer waits.
+	//   "drop-newest"— if the channel is full when the producer arrives,
+	//                  drop the *new* task and record it on
+	//                  metrics.StreamQueueDropsNewest. The already-queued
+	//                  tasks make progress unimpeded.
+	//   "drop-oldest"— if the channel is full, pop the oldest task,
+	//                  release any TX packet it holds, and then enqueue
+	//                  the new one. Records the dropped task on
+	//                  metrics.StreamQueueDropsOldest.
+	//
+	// Wire compatibility: local-only — the consumer side sees no change
+	// other than potentially never seeing a particular packet. ARQ
+	// retransmission still recovers any dropped data, so correctness is
+	// preserved at the cost of a retransmit. Recommended only on
+	// deployments seeing OOM under bursty traffic; "block" is safer on
+	// links with abundant memory and bursty bandwidth.
+	StreamQueueOverflowPolicy             string            `toml:"STREAM_QUEUE_OVERFLOW_POLICY"`
 	Resolvers                             []ResolverAddress `toml:"-"`
 	ResolverMap                           map[string]int    `toml:"-"`
 }
@@ -286,6 +318,11 @@ func defaultClientConfig() ClientConfig {
 		// (3 OOS-ACKs to trigger fast retx; 4×WindowSize retx/sec cap).
 		ARQFastRetxThreshold:                  0,
 		ARQRetxBudgetPerSecond:                0,
+		// Step 20 default — preserve pre-Step-20 behaviour exactly: the
+		// planner / writer queues block the producer until a slot is
+		// free. Operators opt into drop-newest or drop-oldest only when
+		// memory ceiling matters more than per-packet preservation.
+		StreamQueueOverflowPolicy:             "block",
 	}
 }
 
@@ -784,6 +821,32 @@ func (c ClientConfig) EffectiveStreamQueueInitialCapacity() int {
 		size += c.PacketDuplicationCount * 4
 	}
 	return clampInt(size, 32, 512)
+}
+
+// StreamQueueOverflowMode is the resolved enum value for
+// StreamQueueOverflowPolicy. Callers in hot paths should consume this
+// integer constant rather than re-parsing the policy string per packet.
+type StreamQueueOverflowMode uint8
+
+const (
+	StreamQueueOverflowBlock      StreamQueueOverflowMode = 0
+	StreamQueueOverflowDropNewest StreamQueueOverflowMode = 1
+	StreamQueueOverflowDropOldest StreamQueueOverflowMode = 2
+)
+
+// EffectiveStreamQueueOverflowMode parses StreamQueueOverflowPolicy into
+// its resolved enum form. Unknown / empty values fall back to "block"
+// (the pre-Step-20 behaviour) so a malformed config never silently
+// switches a deployment into a drop policy.
+func (c ClientConfig) EffectiveStreamQueueOverflowMode() StreamQueueOverflowMode {
+	switch strings.ToLower(strings.TrimSpace(c.StreamQueueOverflowPolicy)) {
+	case "drop-newest", "drop_newest", "newest":
+		return StreamQueueOverflowDropNewest
+	case "drop-oldest", "drop_oldest", "oldest":
+		return StreamQueueOverflowDropOldest
+	default:
+		return StreamQueueOverflowBlock
+	}
 }
 
 func (c ClientConfig) EffectiveOrphanQueueInitialCapacity() int {
