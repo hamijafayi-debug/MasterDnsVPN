@@ -81,6 +81,17 @@ type ClientConfig struct {
 	MTUProbeAggressive                    bool              `toml:"MTU_PROBE_AGGRESSIVE"`
 	MTUProbeRetryBackoffMS                int               `toml:"MTU_PROBE_RETRY_BACKOFF_MS"`
 	MTUProbeGapPruneBytes                 int               `toml:"MTU_PROBE_GAP_PRUNE_BYTES"`
+	// Step 15 — Resolver Health.
+	//   * ResolverCBConsecutiveTimeouts: when >0, force-disables a resolver
+	//     that has seen this many timeouts in a row without an intervening
+	//     success, bypassing the statistical-window check. Dramatic
+	//     stuck-time reduction on blackhole resolvers. Recommended 4..8.
+	//   * ResolverReactivationProbationMS: window (ms) during which a
+	//     freshly reactivated resolver is deprioritised in the balancer
+	//     selection hot-path, giving it a gradual ramp-up rather than
+	//     instant full traffic. 0 disables.
+	ResolverCBConsecutiveTimeouts         int               `toml:"RESOLVER_CB_CONSECUTIVE_TIMEOUTS"`
+	ResolverReactivationProbationMS       int               `toml:"RESOLVER_REACTIVATION_PROBATION_MS"`
 	RX_TX_Workers                         int               `toml:"RX_TX_WORKERS"`
 	LegacyTunnelReaderWorkers             int               `toml:"TUNNEL_READER_WORKERS"`
 	LegacyTunnelWriterWorkers             int               `toml:"TUNNEL_WRITER_WORKERS"`
@@ -196,6 +207,11 @@ func defaultClientConfig() ClientConfig {
 		MTUProbeAggressive:                    false,
 		MTUProbeRetryBackoffMS:                0,
 		MTUProbeGapPruneBytes:                 0,
+		// Step 15 — Resolver Health knobs default to off so the legacy
+		// statistical-window auto-disable + instant-reactivation behaviour
+		// is unchanged. Operators opt in.
+		ResolverCBConsecutiveTimeouts:         0,
+		ResolverReactivationProbationMS:       0,
 		RX_TX_Workers:                         4,
 		TunnelProcessWorkers:                  0,
 		TunnelPacketTimeoutSec:                10.0,
@@ -489,6 +505,23 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	}
 	if cfg.MTUProbeGapPruneBytes > 256 {
 		cfg.MTUProbeGapPruneBytes = 256
+	}
+	// Step 15 — Resolver Health validation clamps.
+	//   * CB threshold: 0..1024. 0 = off; >1024 is nonsensical because a
+	//     statistical window check would have fired long before then.
+	//   * Probation: 0..600_000 ms (10 minutes). Above that a stuck
+	//     reactivation would block recovery indefinitely.
+	if cfg.ResolverCBConsecutiveTimeouts < 0 {
+		cfg.ResolverCBConsecutiveTimeouts = 0
+	}
+	if cfg.ResolverCBConsecutiveTimeouts > 1024 {
+		cfg.ResolverCBConsecutiveTimeouts = 1024
+	}
+	if cfg.ResolverReactivationProbationMS < 0 {
+		cfg.ResolverReactivationProbationMS = 0
+	}
+	if cfg.ResolverReactivationProbationMS > 600000 {
+		cfg.ResolverReactivationProbationMS = 600000
 	}
 	legacyRX_TX_Workers := max(cfg.LegacyTunnelReaderWorkers, cfg.LegacyTunnelWriterWorkers)
 	if !cfg.explicitRX_TX_Workers && legacyRX_TX_Workers > 0 {

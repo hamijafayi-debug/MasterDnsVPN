@@ -123,6 +123,22 @@ type Balancer struct {
 	autoDisableTimeoutWindow time.Duration
 	onResolverDisabled       func(*Connection, string)
 	confirmResolverDown      func(*Connection, time.Duration) bool
+
+	// Step 15 — Resolver Health knobs.
+	//
+	// cbConsecutiveTimeouts is the threshold for the lightweight circuit
+	// breaker. When >0, any resolver that accumulates this many timeouts
+	// in a row (without a single intervening success) is fast-tracked to
+	// `IsValid=false` *bypassing* the regular statistical-window check.
+	// 0 disables the breaker (legacy behaviour). Typical values: 4..8.
+	//
+	// reactivationProbation is how long a freshly reactivated resolver
+	// stays on probation. During this window the balancer's selection
+	// hot-path skips it whenever a non-probation alternative exists,
+	// preventing a "thundering herd" of traffic from drowning a resolver
+	// that may have only just come back up. 0 disables the ramp-up.
+	cbConsecutiveTimeouts atomic.Uint32
+	reactivationProbation atomic.Int64 // nanoseconds
 }
 
 type connectionStats struct {
@@ -136,6 +152,23 @@ type connectionStats struct {
 	windowLost      atomic.Uint32
 	windowMu        sync.Mutex
 	halfLifeRunning atomic.Bool
+
+	// Step 15 — Resolver Health
+	//
+	// consecutiveTimeouts tracks how many timeouts have happened in a row
+	// without an intervening success. Used by the lightweight circuit
+	// breaker (see Balancer.cbConsecutiveTimeouts) to fast-track a disable
+	// decision without waiting for the full statistical window to fill.
+	// Reset to 0 on any success.
+	consecutiveTimeouts atomic.Uint32
+
+	// probationUntil is a UnixNano deadline during which a freshly
+	// reactivated resolver is considered "on probation". The balancer's
+	// selection hot path deprioritises probation-resolvers when at least
+	// one fully-trusted alternative is available, giving the resolver a
+	// gradual ramp-up rather than instant full traffic. Zero means no
+	// probation in effect.
+	probationUntil atomic.Int64
 }
 
 const connectionStatsHalfLifeThreshold = 1000
@@ -180,6 +213,32 @@ func (b *Balancer) SetAutoDisableConfig(enabled bool, window time.Duration) {
 	b.autoDisableEnabled = enabled
 	b.autoDisableTimeoutWindow = window
 	b.mu.Unlock()
+}
+
+// SetResolverHealthConfig configures the Step 15 fast-disable circuit breaker
+// and post-reactivation probation period. Pass 0 to either knob to disable
+// that behaviour (legacy semantics).
+//
+//   - cbConsecutiveTimeouts: how many consecutive timeouts (with no
+//     intervening success) before a resolver is force-disabled, bypassing
+//     the statistical-window check. Recommended: 4..8.
+//   - probation: how long a freshly reactivated resolver stays deprioritised
+//     in the selection hot-path. Recommended: 5s..30s.
+//
+// Both knobs are stored atomically so the read-only hot-path (selection /
+// ReportTimeout) doesn't have to take b.mu.
+func (b *Balancer) SetResolverHealthConfig(cbConsecutiveTimeouts int, probation time.Duration) {
+	if b == nil {
+		return
+	}
+	if cbConsecutiveTimeouts < 0 {
+		cbConsecutiveTimeouts = 0
+	}
+	if probation < 0 {
+		probation = 0
+	}
+	b.cbConsecutiveTimeouts.Store(uint32(cbConsecutiveTimeouts))
+	b.reactivationProbation.Store(int64(probation))
 }
 
 func (b *Balancer) SetResolverDisabledHandler(handler func(*Connection, string)) {
@@ -309,6 +368,17 @@ func (b *Balancer) SetConnectionValidityWithLog(key string, valid bool, logReact
 	if valid {
 		if stats := b.stats[idx]; stats != nil {
 			stats.resetWindow()
+			// Step 15: any reactivation clears the consecutive-timeout
+			// counter so the circuit breaker starts fresh.
+			stats.consecutiveTimeouts.Store(0)
+			// Set the probation deadline if a non-zero probation window
+			// has been configured. The selection hot path will then
+			// deprioritise this resolver for the duration of the window.
+			if probation := b.reactivationProbation.Load(); probation > 0 {
+				stats.probationUntil.Store(time.Now().UnixNano() + probation)
+			} else {
+				stats.probationUntil.Store(0)
+			}
 		}
 	} else {
 		b.clearPreferredResolverReferencesLocked(key)
@@ -384,6 +454,10 @@ func (b *Balancer) ReportSuccess(serverKey string, rtt time.Duration) {
 	}
 
 	stats.acked.Add(1)
+	// Step 15: any success clears the consecutive-timeout streak so that a
+	// single late-but-successful reply resets the circuit breaker. Otherwise
+	// a resolver that's occasionally slow could be tipped over the breaker.
+	stats.consecutiveTimeouts.Store(0)
 	if rtt > 0 {
 		stats.rttMicrosSum.Add(uint64(rtt / time.Microsecond))
 		stats.rttCount.Add(1)
@@ -399,6 +473,11 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 	stats.lost.Add(1)
 	stats.applyHalfLife()
 
+	// Step 15: track consecutive timeouts for the lightweight circuit
+	// breaker. Any ReportSuccess will reset this counter to 0, so a
+	// single intervening reply restores trust in the resolver.
+	consecutive := stats.consecutiveTimeouts.Add(1)
+
 	totalTimedOut, totalSent := stats.recordWindowTimeout(now, window)
 	b.mu.Lock()
 	conn, ok := b.connectionByKeyLocked(serverKey)
@@ -408,10 +487,23 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 	}
 
 	activeCount := len(b.activeIDs)
-	minObservations := autoDisableMinObservationsForActiveCount(activeCount, window)
-	if int(totalSent) < minObservations || totalTimedOut != totalSent {
-		b.mu.Unlock()
-		return false
+
+	// Step 15: lightweight circuit breaker. When the operator has opted in
+	// via SetResolverHealthConfig and we've seen `cbThreshold` timeouts in
+	// a row, fast-track the disable decision *without* waiting for the
+	// statistical window to fill. This is the dominant stuck-time saver
+	// for blackhole resolvers (network drop / firewall drop) where the
+	// regular window-based check would otherwise wait for `minObservations`
+	// timeouts before deciding the resolver is dead.
+	cbThreshold := b.cbConsecutiveTimeouts.Load()
+	cbTripped := cbThreshold > 0 && consecutive >= cbThreshold
+
+	if !cbTripped {
+		minObservations := autoDisableMinObservationsForActiveCount(activeCount, window)
+		if int(totalSent) < minObservations || totalTimedOut != totalSent {
+			b.mu.Unlock()
+			return false
+		}
 	}
 
 	if minActive < 0 {
@@ -457,14 +549,24 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 		b.moveConnectionStateLocked(idx, false)
 	}
 
+	reason := "TIMEOUT"
+	if cbTripped {
+		reason = "CIRCUIT_BREAKER"
+	}
+
 	if b.onResolverDisabled != nil {
 		handler := b.onResolverDisabled
-		handler(conn, "TIMEOUT")
+		handler(conn, reason)
 	}
 
 	if b.log != nil {
-		b.log.Warnf("<red>DNS Resolver disabled (100%% Loss): <cyan>%s</cyan> <cyan>%s</cyan>) | <cyan>%s</cyan> | Remaining: <cyan>%d</cyan></red>",
-			conn.ResolverLabel, conn.Domain, conn.Resolver, len(b.activeIDs))
+		if cbTripped {
+			b.log.Warnf("<red>DNS Resolver disabled (circuit breaker, %d consecutive timeouts): <cyan>%s</cyan> <cyan>%s</cyan>) | <cyan>%s</cyan> | Remaining: <cyan>%d</cyan></red>",
+				consecutive, conn.ResolverLabel, conn.Domain, conn.Resolver, len(b.activeIDs))
+		} else {
+			b.log.Warnf("<red>DNS Resolver disabled (100%% Loss): <cyan>%s</cyan> <cyan>%s</cyan>) | <cyan>%s</cyan> | Remaining: <cyan>%d</cyan></red>",
+				conn.ResolverLabel, conn.Domain, conn.Resolver, len(b.activeIDs))
+		}
 	}
 
 	b.mu.Unlock()
@@ -1806,6 +1908,13 @@ func (b *Balancer) roundRobinBestConnectionLocked() (Connection, bool) {
 	if len(b.activeIDs) == 0 {
 		return Connection{}, false
 	}
+	// Step 15: prefer non-probation resolvers when any are available, so a
+	// freshly reactivated resolver receives only a trickle of traffic
+	// until its probation window ends. Fall back to the probation-locked
+	// resolver only when *all* active resolvers are on probation.
+	if idx, ok := b.rotatedActiveNonProbationLocked(); ok {
+		return b.connections[idx], true
+	}
 	pos := roundRobinStartIndex(b.rrCounter.Add(1)-1, len(b.activeIDs))
 	return b.connections[b.activeIDs[pos]], true
 }
@@ -1814,6 +1923,21 @@ func (b *Balancer) roundRobinBestConnectionExcludingLocked(excludeKey string) (C
 	if len(b.activeIDs) == 0 {
 		return Connection{}, false
 	}
+	// Step 15: same probation-skip semantics as roundRobinBestConnectionLocked.
+	now := time.Now().UnixNano()
+	probationActive := b.reactivationProbation.Load() > 0
+	if probationActive {
+		for _, idx := range b.rotatedActiveIndicesLocked(1) {
+			if b.connections[idx].Key == excludeKey {
+				continue
+			}
+			if b.idxOnProbationLocked(idx, now) {
+				continue
+			}
+			return b.connections[idx], true
+		}
+	}
+	// Fallback: include probation entries.
 	for _, idx := range b.rotatedActiveIndicesLocked(1) {
 		if b.connections[idx].Key == excludeKey {
 			continue
@@ -1821,6 +1945,74 @@ func (b *Balancer) roundRobinBestConnectionExcludingLocked(excludeKey string) (C
 		return b.connections[idx], true
 	}
 	return Connection{}, false
+}
+
+// rotatedActiveNonProbationLocked walks the active indices in round-robin
+// order and returns the first one that is not on probation. Returns
+// (_, false) if every active resolver is currently on probation OR if
+// probation is disabled (so the caller should fall through to the legacy
+// RR path which is one statement, faster than a manual loop).
+func (b *Balancer) rotatedActiveNonProbationLocked() (int, bool) {
+	if b.reactivationProbation.Load() <= 0 {
+		return 0, false
+	}
+	if len(b.activeIDs) == 0 {
+		return 0, false
+	}
+	now := time.Now().UnixNano()
+	// First pass — peek for any non-probation entry without bumping the RR
+	// counter. If we find one, then bump once to consume it.
+	allOnProbation := true
+	for _, idx := range b.activeIDs {
+		if !b.idxOnProbationLocked(idx, now) {
+			allOnProbation = false
+			break
+		}
+	}
+	if allOnProbation {
+		return 0, false
+	}
+	// Now bump the counter and find the next non-probation entry.
+	pos := roundRobinStartIndex(b.rrCounter.Add(1)-1, len(b.activeIDs))
+	for i := 0; i < len(b.activeIDs); i++ {
+		idx := b.activeIDs[(pos+i)%len(b.activeIDs)]
+		if !b.idxOnProbationLocked(idx, now) {
+			return idx, true
+		}
+	}
+	return 0, false
+}
+
+// idxOnProbationLocked reports whether the resolver at b.connections[idx] is
+// still inside its post-reactivation probation window. Called only from
+// already-locked paths (RLock or Lock); the probation timestamp itself is
+// stored atomically on the per-resolver stats so the load is wait-free.
+func (b *Balancer) idxOnProbationLocked(idx int, nowUnixNano int64) bool {
+	if idx < 0 || idx >= len(b.stats) {
+		return false
+	}
+	stats := b.stats[idx]
+	if stats == nil {
+		return false
+	}
+	deadline := stats.probationUntil.Load()
+	return deadline > 0 && nowUnixNano < deadline
+}
+
+// IsOnProbation reports whether the resolver identified by serverKey is
+// currently in its post-reactivation probation window. Exposed for tests
+// and metrics. Returns false if probation is disabled, the resolver is
+// unknown, or the deadline has already passed.
+func (b *Balancer) IsOnProbation(serverKey string) bool {
+	if b == nil {
+		return false
+	}
+	stats := b.statsForKey(serverKey)
+	if stats == nil {
+		return false
+	}
+	deadline := stats.probationUntil.Load()
+	return deadline > 0 && time.Now().UnixNano() < deadline
 }
 
 func (b *Balancer) rotatedActiveIndicesLocked(step int) []int {

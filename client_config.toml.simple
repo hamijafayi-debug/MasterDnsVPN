@@ -242,6 +242,38 @@ MTU_PROBE_GAP_PRUNE_BYTES = 0
 # Range: 0..5000 ms.
 MTU_PROBE_RETRY_BACKOFF_MS = 0
 
+# === Step 15: Resolver Health — circuit breaker + reactivation probation ===
+#
+# Lightweight circuit breaker. When RESOLVER_CB_CONSECUTIVE_TIMEOUTS > 0,
+# any resolver that accumulates this many consecutive timeouts WITHOUT a
+# single intervening successful reply is force-disabled immediately,
+# bypassing the statistical-window check that otherwise waits for
+# AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS to fill with observations.
+#
+# This is the dominant stuck-time saver for blackhole resolvers
+# (firewall drops, NAT timeouts, route blackholes) where the regular
+# statistical check would otherwise leave traffic stuck on the dead
+# resolver until enough probes have been sent. Any successful reply
+# resets the consecutive counter to zero.
+#
+# Recommended: 4..8. Set to 0 to disable the breaker (legacy semantics).
+# Range: 0..1024.
+RESOLVER_CB_CONSECUTIVE_TIMEOUTS = 0
+
+# Post-reactivation probation window (milliseconds).
+#
+# When RECHECK_INACTIVE_SERVERS_ENABLED reactivates a previously disabled
+# resolver, that resolver normally goes back into full-speed traffic
+# rotation instantly. If RESOLVER_REACTIVATION_PROBATION_MS > 0, the
+# balancer instead deprioritises the freshly reactivated resolver for the
+# specified window, so the resolver receives only fallback traffic until
+# the window elapses. This gives a gradual ramp-up rather than a
+# "thundering herd" of packets on a resolver that may still be flaky.
+#
+# Recommended: 5000..30000 (5s..30s). Set to 0 to disable (legacy
+# instant-traffic behaviour). Range: 0..600000.
+RESOLVER_REACTIVATION_PROBATION_MS = 0
+
 # Export successful MTU-tested resolvers to a file.
 SAVE_MTU_SERVERS_TO_FILE = false
 
