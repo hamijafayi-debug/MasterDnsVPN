@@ -59,7 +59,7 @@
 - [x] استپ ۱۵ — Resolver Health: تشخیص سریع‌تر outage و reactivation هوشمند  ✅ 2026-05-25
 - [x] استپ ۱۶ — Duplication Policy: انتخاب وفقی به جای ثابت  ✅ 2026-05-25
 - [x] استپ ۱۷ — SOCKS5 Upstream: connection pooling و reuse  ✅ 2026-05-25
-- [ ] استپ ۱۸ — Cache Layer: dnscache زیرساخت hot/cold و prune بهینه
+- [x] استپ ۱۸ — Cache Layer: dnscache زیرساخت hot/cold و prune بهینه  ✅ 2026-05-25
 - [ ] استپ ۱۹ — Goroutine Audit & Lifecycle (نشت‌یاب)
 - [ ] استپ ۲۰ — Backpressure & Bounded Queues تمام لایه‌ها
 - [ ] استپ ۲۱ — CI Regression Bench (محافظ سرعت در PR‌ها)
@@ -454,13 +454,35 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 
 تست‌های `-race -count=1` همه پکیج‌ها پاس می‌شن.
 
-### استپ ۱۸ — DNS Cache Layer
+### استپ ۱۸ — DNS Cache Layer ✅
 هدف: کاهش lookup سرور وقتی سرور resolve محلی هم انجام می‌دهد.
-- [ ] تقسیم cache به hot tier (in-memory LRU کوچک و سریع) و cold tier (فعلی)
-- [ ] prune دوره‌ای با amortized cost پایین (به جای scan کامل)
-- [ ] بنچ hit-rate و lookup latency
-- [ ] تست TTL accuracy
-- [ ] رصد cache_hits / cache_misses در expvar (از استپ ۱)
+- [x] تقسیم cache به hot tier (in-memory LRU کوچک و سریع) و cold tier (فعلی)
+- [x] prune دوره‌ای با amortized cost پایین (به جای scan کامل)
+- [x] بنچ hit-rate و lookup latency
+- [x] تست TTL accuracy
+- [x] رصد cache_hits / cache_misses در expvar (از استپ ۱)
+
+**نتایج:**
+- Hot tier جدید (`internal/dnscache/store.go`): یک LRU کوچک تک-mutex (`container/list` + map) که جلوی sharded cold tier نشسته. `Get` بدون defer برای کاهش overhead؛ روی hit، entry را MRU می‌کند و LastUsedAt را به‌روزرسانی می‌کند. روی stale (همان TTL تیر سرد) صفر می‌شود.
+- Promotion lazy است: cold hit → یک کپی به hot؛ نوشتن (SetReady) فقط hot موجود را invalidate می‌کند (بدون آلوده‌سازی working-set).
+- Coherence: `removeElementLocked` در cold (expire/evict/ClearPending) به‌صورت خودکار hot را invalidate می‌کند. هیچ‌گاه stale از hot سرو نمی‌شود.
+- `PruneExpired(now, maxScanPerShard)` جدید: per-shard cursor، با کار محدود `maxScan * shardCount` در هر فراخوانی. در `udpserver/dns_cache_pruner.go` یک goroutine پس‌زمینه با `DNSCachePruneIntervalSeconds` آن را تیک می‌زند (default=0=خاموش).
+- Metrics: `metrics.CacheHits` و `metrics.CacheMisses` در `GetReady` (هر دو مسیر hot/cold) + `LookupOrCreatePending` (مسیر کلاینت) wire شدند. counter ها از قبل register شده بودند، فقط wire-up لازم بود.
+- 3 knob جدید سرور (همه default off): `DNS_CACHE_HOT_TIER_SIZE`, `DNS_CACHE_PRUNE_INTERVAL_SECONDS`, `DNS_CACHE_PRUNE_MAX_SCAN_PER_SHARD`. hot size به maxRecords clamp می‌شود.
+
+**بنچ‌مارک (Xeon 2.5GHz × 2 core، 1000-key working set، 64 hot keys):**
+| Bench | ns/op | allocs |
+| --- | --- | --- |
+| `GetReady_ColdOnly_Parallel` | 153.4 | 1 |
+| `GetReady_HotEnabled_Parallel` | **134.5** | 1 |
+| `GetReady_ColdOnly` (serial) | 120.5 | 1 |
+| `GetReady_HotEnabled` (serial) | 230.2 | 1 |
+
+تحت contention موازی → **~13% کاهش latency** (hot mutex بسیار سبک‌تر از shard mutex است که با writer ها هم رقابت می‌کند). در حالت serial سربار اضافه ناچیز است؛ workload واقعی سرور موازی است.
+
+**تست‌ها:** `internal/dnscache/store_step18_test.go` (14 unit + 4 bench). موارد پوشش: hot hit با patch ID، cold→hot promotion، SetReady invalidation، cold-expiry → hot cleanup، LRU bound، default-off behaviour، metrics counters درست تیک می‌زنند، PruneExpired فقط expired را حذف و pending را skip می‌کند، bounded work، cursor coverage، EnableHotTier idempotent، clamp به cold cap، concurrent stress.
+
+تست‌های `-race -count=1` تمام 21 پکیج پاس می‌شن.
 
 ### استپ ۱۹ — Goroutine Audit & Lifecycle
 هدف: حذف نشت goroutine و تضمین خاتمه روی shutdown.
