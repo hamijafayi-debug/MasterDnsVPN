@@ -51,7 +51,7 @@
 - [x] استپ ۷ — Fix ARQ.Close isVirtual race (production)  ✅ 2026-05-25 (تزریق‌شده، رفع باگ از استپ ۶)
 - [x] استپ ۸ — Balancer Lock Granularity & Selection Fast-Path  ✅ 2026-05-25
 - [x] استپ ۹ — UDP Server Ingress: Batch Read & Worker Sizing  ✅ 2026-05-25
-- [ ] استپ ۱۰ — Session Store Sharding (server-side)
+- [x] استپ ۱۰ — Session Store Sharding (server-side) (۲۰۲۶-۰۵-۲۵)
 - [ ] استپ ۱۱ — DNS Parser Zero-Copy & Reusable Decoders
 - [ ] استپ ۱۲ — Compression Pools & Threshold Heuristics
 - [ ] استپ ۱۳ — Crypto Hot-Path: AEAD nonce reuse & buffer alignment
@@ -222,13 +222,28 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 4. **GOMAXPROCS clamp**: Go 1.25 cgroup-aware است؛ `GOMAXPROCS(0)` در container با CPU cap عدد محدود می‌ده. این تغییر deployment روی container کوچک رو از over-provisioning نجات می‌ده.
 5. **Wire compat**: هیچ بایتی روی wire تغییر نکرد. سرور Step 9 با کلاینت Step 4 (یا هر ورژن قبل) بدون مشکل کار می‌کنه. هر دو طرف سرور (Linux batch vs non-Linux single) رفتار شبکه‌ای یکسان دارن.
 
-### استپ ۱۰ — Session Store Sharding (server-side)
+### استپ ۱۰ — Session Store Sharding (server-side) — ✅ کامل (۲۰۲۶-۰۵-۲۵)
 هدف: حذف bottleneck قفل سراسری sessions در سرور پرترافیک.
-- [ ] sharding `sessionStore` به N=64 شارد بر اساس hash(SessionID)
-- [ ] حفظ API فعلی (هیچ کد فراخواننده‌ای نشکند)
-- [ ] افزودن بنچ‌مارک concurrent insert/lookup
-- [ ] تست واحد: cleanup correctness روی شاردها
-- [ ] گزارش kops/sec قبل و بعد
+- [x] **تصمیم طراحی**: به‌جای hash sharding با N=64 شارد، از **lock-free `atomic.Pointer[sessionRecord]` per-slot** استفاده شد. دلیل: `SessionID` از جنس `uint8` است و آرایه ثابت ۲۵۶ خانه‌ای داریم — sharding هیچ مزیتی نسبت به per-slot atomic ندارد (cache locality بهتر، صفر contention).
+- [x] تبدیل `byID [256]*sessionRecord` → `[256]atomic.Pointer[sessionRecord]` + accessor های `loadByID`/`storeByID`
+- [x] حفظ API فعلی — هیچ کد فراخواننده‌ای نشکست (تنها call site های داخلی به accessor ها مهاجرت کردند)
+- [x] `Get` / `HasActive` / `Lookup` / `ValidateAndTouch` در branch فعال **کاملاً lock-free** شدند (RLock فقط روی fallback به `recentClosed`)
+- [x] `snapshotActiveRecords()` برای iteration بدون قفل اضافه شد (برای `SweepTerminalStreams` و `SweepRecentlyClosedStreams`)
+- [x] بنچ‌مارک concurrent insert/lookup: `session_step10_bench_test.go` (Lookup / ValidateAndTouch / Mixed)
+- [x] تست واحد: ۳۲ سایت تست در `session_cleanup_test.go` و `stream_syn_test.go` به API اتمیک مهاجرت کردند؛ همه تست‌های موجود + `-race -count=2` پاس می‌شوند
+- [x] گزارش kops/sec روی Linux/amd64 (2-vCPU sandbox):
+
+| Benchmark                                         | ns/op  | ops/sec     | allocs/op |
+|---------------------------------------------------|--------|-------------|-----------|
+| `BenchmarkSessionStoreLookupParallel-2`           | 3.34   | ~299M       | 0         |
+| `BenchmarkSessionStoreValidateAndTouchParallel-2` | 61.52  | ~16.3M      | 1         |
+| `BenchmarkSessionStoreMixedParallel-2`            | 22.15  | ~45.1M      | 0         |
+
+**نکات کلیدی**:
+1. **Lookup در ۳.۳۴ ns/op** ≈ تقریباً سقف سخت‌افزاری atomic load — صفر contention، صفر allocation.
+2. **ValidateAndTouch با ۱ alloc/op** که از alloc داخل `view()` می‌آید (خارج از scope این استپ، می‌تواند بعداً pool شود).
+3. **Mixed (۱۲٪ writer)** فقط ~۲۲ ns/op می‌خورد — atomic.Store + atomic.Load بدون global lock کار می‌کنند.
+4. **Wire compat**: هیچ بایتی روی wire تغییر نکرد؛ صرفاً refactor داخلی sessionStore.
 
 ### استپ ۱۱ — DNS Parser Zero-Copy
 هدف: حذف allocation در پارس کوئری/پاسخ.

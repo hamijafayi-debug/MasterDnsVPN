@@ -202,7 +202,7 @@ type sessionStore struct {
 	nextReuseSweepUnixNano int64
 	cookieBytes            [32]byte
 	cookieIndex            int
-	byID                   [maxServerSessionID + 1]*sessionRecord
+	byID                   [maxServerSessionID + 1]atomic.Pointer[sessionRecord]
 	bySig                  map[[sessionInitDataSize]byte]uint8
 	recentClosed           map[uint8]closedSessionRecord
 	orphanQueueCap         int
@@ -213,6 +213,26 @@ type sessionStore struct {
 	recentlyClosedTTL      time.Duration
 	recentlyClosedCap      int
 }
+
+// loadByID returns the current sessionRecord pointer at the given slot
+// without taking any lock. Returns nil if the slot is empty.
+//
+// Step 10 — foundation of the lock-free read fast-path. Every hot-path
+// lookup (Get / HasActive / Lookup-active / ValidateAndTouch-active) goes
+// through this single atomic load instead of acquiring s.mu.RLock as it
+// used to.
+func (s *sessionStore) loadByID(sessionID uint8) *sessionRecord {
+	return s.byID[sessionID].Load()
+}
+
+// storeByID publishes a sessionRecord pointer at the given slot. It is
+// always invoked while holding s.mu so writers keep bySig / activeCount /
+// recentClosed consistent with slot transitions; the atomic store exists
+// so lock-free readers can observe the publish without locking.
+func (s *sessionStore) storeByID(sessionID uint8, record *sessionRecord) {
+	s.byID[sessionID].Store(record)
+}
+
 
 func newSessionStore(orphanQueueCap int, streamQueueCap int, options ...any) *sessionStore {
 	if orphanQueueCap < 1 {
@@ -278,7 +298,7 @@ func (s *sessionStore) findOrCreate(
 	s.expireReuseLocked(nowUnixNano)
 
 	if sessionID, ok := s.bySig[signature]; ok {
-		if existing := s.byID[sessionID]; existing != nil {
+		if existing := s.loadByID(sessionID); existing != nil {
 			if nowUnixNano <= existing.reuseUntilUnixNano {
 				existing.setLastActivityUnixNano(nowUnixNano)
 				return existing, true, nil
@@ -325,7 +345,7 @@ func (s *sessionStore) findOrCreate(
 	copy(record.VerifyCode[:], payload[6:10])
 	record.Cookie = s.randomCookieLocked()
 
-	s.byID[slot] = record
+	s.storeByID(uint8(slot), record)
 	s.activeCount++
 	s.bySig[signature] = uint8(slot)
 	s.updateNextReuseSweepLocked(record.reuseUntilUnixNano)
@@ -345,7 +365,7 @@ func (s *sessionStore) expireReuseLocked(nowUnixNano int64) {
 
 	nextReuseSweepUnixNano := int64(0)
 	for signature, sessionID := range s.bySig {
-		record := s.byID[sessionID]
+		record := s.loadByID(sessionID)
 		if record == nil || nowUnixNano > record.reuseUntilUnixNano {
 			delete(s.bySig, signature)
 			continue
@@ -357,32 +377,35 @@ func (s *sessionStore) expireReuseLocked(nowUnixNano int64) {
 	s.nextReuseSweepUnixNano = nextReuseSweepUnixNano
 }
 
+// Get returns the active session record for sessionID, lock-free.
+//
+// Step 10: previously held s.mu.RLock for the load. After the byID array
+// switched to atomic.Pointer the read collapses to a single atomic load
+// with no contention against concurrent findOrCreate / Close / Cleanup.
 func (s *sessionStore) Get(sessionID uint8) (*sessionRecord, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	record := s.byID[sessionID]
+	record := s.loadByID(sessionID)
 	if record == nil || record.isClosed() {
 		return nil, false
 	}
 	return record, true
 }
 
+// HasActive is the lock-free hot-path liveness probe.
 func (s *sessionStore) HasActive(sessionID uint8) bool {
 	if s == nil || sessionID == 0 {
 		return false
 	}
 
-	s.mu.RLock()
-	record := s.byID[sessionID]
-	s.mu.RUnlock()
+	record := s.loadByID(sessionID)
 	return record != nil && !record.isClosed()
 }
 
+// Lookup resolves sessionID to either an active-session view, a recently-
+// closed view, or "unknown". The active branch is lock-free; only the
+// recently-closed branch acquires the RLock (rare — happens when a client
+// retries with a stale sessionID after we've already closed it).
 func (s *sessionStore) Lookup(sessionID uint8) (sessionLookupResult, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if record := s.byID[sessionID]; record != nil {
+	if record := s.loadByID(sessionID); record != nil {
 		return sessionLookupResult{
 			Cookie:       record.Cookie,
 			ResponseMode: record.ResponseMode,
@@ -390,6 +413,8 @@ func (s *sessionStore) Lookup(sessionID uint8) (sessionLookupResult, bool) {
 		}, true
 	}
 
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if record, ok := s.recentClosed[sessionID]; ok {
 		return sessionLookupResult{
 			Cookie:       record.Cookie,
@@ -401,9 +426,12 @@ func (s *sessionStore) Lookup(sessionID uint8) (sessionLookupResult, bool) {
 	return sessionLookupResult{}, false
 }
 
+// ValidateAndTouch is the per-packet auth + activity-stamp path. The
+// active branch is fully lock-free (single atomic load on byID, then
+// atomic store via setLastActivity). Only the rare recently-closed branch
+// (or "unknown" miss) acquires s.RLock.
 func (s *sessionStore) ValidateAndTouch(sessionID uint8, cookie uint8, now time.Time) sessionValidationResult {
-	s.mu.RLock()
-	if record := s.byID[sessionID]; record != nil {
+	if record := s.loadByID(sessionID); record != nil {
 		result := sessionValidationResult{
 			Lookup: sessionLookupResult{
 				Cookie:       record.Cookie,
@@ -416,16 +444,14 @@ func (s *sessionStore) ValidateAndTouch(sessionID uint8, cookie uint8, now time.
 		if result.Valid {
 			view := record.runtimeView()
 			result.Active = &view
-		}
-		s.mu.RUnlock()
-		if result.Valid {
 			record.setLastActivity(now)
 		}
 		return result
 	}
 
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if record, ok := s.recentClosed[sessionID]; ok {
-		s.mu.RUnlock()
 		return sessionValidationResult{
 			Lookup: sessionLookupResult{
 				Cookie:       record.Cookie,
@@ -437,7 +463,6 @@ func (s *sessionStore) ValidateAndTouch(sessionID uint8, cookie uint8, now time.
 		}
 	}
 
-	s.mu.RUnlock()
 	return sessionValidationResult{}
 }
 
@@ -445,14 +470,14 @@ func (s *sessionStore) Close(sessionID uint8, now time.Time, retention time.Dura
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	record := s.byID[sessionID]
+	record := s.loadByID(sessionID)
 	if record == nil {
 		return nil, false
 	}
 	record.markClosed()
 
 	delete(s.bySig, record.Signature)
-	s.byID[sessionID] = nil
+	s.storeByID(sessionID, nil)
 	if s.activeCount > 0 {
 		s.activeCount--
 	}
@@ -488,7 +513,7 @@ func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedR
 	expired := make([]closedSessionCleanup, 0, 8)
 	idleTimeoutNanos := idleTimeout.Nanoseconds()
 	for sessionID := 1; sessionID <= maxServerSessionID; sessionID++ {
-		record := s.byID[sessionID]
+		record := s.loadByID(uint8(sessionID))
 		if record == nil {
 			continue
 		}
@@ -499,7 +524,7 @@ func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedR
 		}
 
 		delete(s.bySig, record.Signature)
-		s.byID[sessionID] = nil
+		s.storeByID(uint8(sessionID), nil)
 		if s.activeCount > 0 {
 			s.activeCount--
 		}
@@ -520,32 +545,28 @@ func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedR
 	return expired
 }
 
-func (s *sessionStore) SweepTerminalStreams(now time.Time, retention time.Duration) {
-	s.mu.RLock()
+// snapshotActiveRecords builds a best-effort, lock-free snapshot of all
+// currently active session records. The sweep helpers below don't need
+// transactional consistency across slots — they apply per-record idempotent
+// pruning — so acquiring s.RLock here would be pure waste under load.
+func (s *sessionStore) snapshotActiveRecords() []*sessionRecord {
 	records := make([]*sessionRecord, 0, len(s.byID))
-	for _, record := range s.byID {
-		if record != nil {
+	for slot := range s.byID {
+		if record := s.byID[slot].Load(); record != nil {
 			records = append(records, record)
 		}
 	}
-	s.mu.RUnlock()
+	return records
+}
 
-	for _, record := range records {
+func (s *sessionStore) SweepTerminalStreams(now time.Time, retention time.Duration) {
+	for _, record := range s.snapshotActiveRecords() {
 		record.cleanupTerminalStreams(now, retention)
 	}
 }
 
 func (s *sessionStore) SweepRecentlyClosedStreams(now time.Time) {
-	s.mu.RLock()
-	records := make([]*sessionRecord, 0, len(s.byID))
-	for _, record := range s.byID {
-		if record != nil {
-			records = append(records, record)
-		}
-	}
-	s.mu.RUnlock()
-
-	for _, record := range records {
+	for _, record := range s.snapshotActiveRecords() {
 		record.pruneRecentlyClosed(now)
 	}
 }
@@ -565,12 +586,12 @@ func (s *sessionStore) allocateSlotLocked() int {
 		start = 1
 	}
 	for slot := start; slot <= maxServerSessionID; slot++ {
-		if s.byID[slot] == nil {
+		if s.loadByID(uint8(slot)) == nil {
 			return slot
 		}
 	}
 	for slot := 1; slot < start; slot++ {
-		if s.byID[slot] == nil {
+		if s.loadByID(uint8(slot)) == nil {
 			return slot
 		}
 	}
@@ -637,7 +658,7 @@ func (s *sessionStore) CollectIdleDeferredSessions(now time.Time, idleTimeout ti
 	idle := make([]idleDeferredCleanup, 0, 4)
 
 	for sessionID := 1; sessionID <= maxServerSessionID; sessionID++ {
-		record := s.byID[sessionID]
+		record := s.loadByID(uint8(sessionID))
 		if record == nil || record.isClosed() {
 			continue
 		}

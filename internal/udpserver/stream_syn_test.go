@@ -116,7 +116,7 @@ func TestQueueImmediateControlAckCreatesStreamForStreamSyn(t *testing.T) {
 	s := newTestServerForStreamSyn("TCP")
 	record := newTestSessionRecord(21)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 
 	packet := packetWithSession(Enums.PACKET_STREAM_SYN, record.ID, record.Cookie, 1)
 	if !s.queueImmediateControlAck(record, packet) {
@@ -138,7 +138,7 @@ func TestProcessDeferredStreamSynQueuesConnectedAndEnablesIO(t *testing.T) {
 	s := newTestServerForStreamSyn("TCP")
 	record := newTestSessionRecord(22)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 
 	local, remote := net.Pipe()
 	defer remote.Close()
@@ -177,7 +177,7 @@ func TestProcessDeferredStreamSynDoesNotAttachAfterCancellation(t *testing.T) {
 	s := newTestServerForStreamSyn("TCP")
 	record := newTestSessionRecord(46)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 
 	dialStarted := make(chan struct{})
 	releaseDial := make(chan struct{})
@@ -240,7 +240,7 @@ func TestHandleStreamSynFastPathsAlreadyConnectedStream(t *testing.T) {
 	s := newTestServerForStreamSyn("TCP")
 	record := newTestSessionRecord(40)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 
 	stream := record.getOrCreateStream(7, s.streamARQConfig(record.DownloadCompression), nil, s.log)
 	if stream == nil {
@@ -277,7 +277,7 @@ func TestHandleSOCKS5SynFastPathsAlreadyConnectedStream(t *testing.T) {
 	s := newTestServerForStreamSyn("SOCKS5")
 	record := newTestSessionRecord(43)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 
 	stream := record.getOrCreateStream(6, s.streamARQConfig(record.DownloadCompression), nil, s.log)
 	if stream == nil {
@@ -316,7 +316,7 @@ func TestProcessDeferredSOCKS5SynDoesNotAttachAfterCancellation(t *testing.T) {
 	s := newTestServerForStreamSyn("SOCKS5")
 	record := newTestSessionRecord(47)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 
 	dialStarted := make(chan struct{})
 	releaseDial := make(chan struct{})
@@ -381,7 +381,7 @@ func TestHandleSOCKS5SynFastPathRejectsDifferentTarget(t *testing.T) {
 	s := newTestServerForStreamSyn("SOCKS5")
 	record := newTestSessionRecord(44)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 
 	stream := record.getOrCreateStream(7, s.streamARQConfig(record.DownloadCompression), nil, s.log)
 	if stream == nil {
@@ -411,7 +411,7 @@ func TestHandleSOCKS5SynImmediateRejectsBlockedTarget(t *testing.T) {
 	s := newTestServerForStreamSyn("SOCKS5")
 	record := newTestSessionRecord(45)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 
 	stream := record.getOrCreateStream(8, s.streamARQConfig(record.DownloadCompression), nil, s.log)
 	if stream == nil {
@@ -439,7 +439,7 @@ func TestHandleStreamSynDedupesPendingDeferredDuplicates(t *testing.T) {
 	s := newTestServerForStreamSyn("TCP")
 	record := newTestSessionRecord(22)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 
 	packet := packetWithSession(Enums.PACKET_STREAM_SYN, record.ID, record.Cookie, 9)
 	if !s.handleStreamSynRequest(packet, viewForRecord(record)) {
@@ -728,7 +728,7 @@ func TestProcessDeferredSOCKS5SynSkipsDialForRecentlyClosedStream(t *testing.T) 
 	s := newTestServerForStreamSyn("SOCKS5")
 	record := newTestSessionRecord(25)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 	record.noteStreamClosed(10, time.Now(), false)
 
 	s.dialStreamUpstreamFn = func(network string, address string, timeout time.Duration) (net.Conn, error) {
@@ -747,7 +747,7 @@ func TestProcessDeferredSOCKS5SynClearsQueuedDuplicatesAfterConnectFailure(t *te
 	s := newTestServerForStreamSyn("SOCKS5")
 	record := newTestSessionRecord(42)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 	s.dialStreamUpstreamFn = func(network string, address string, timeout time.Duration) (net.Conn, error) {
 		return nil, errors.New("dial failed")
 	}
@@ -775,7 +775,7 @@ func TestProcessDeferredStreamSynQueuesConnectFailOnDialError(t *testing.T) {
 	s := newTestServerForStreamSyn("TCP")
 	record := newTestSessionRecord(23)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 	s.dialStreamUpstreamFn = func(network string, address string, timeout time.Duration) (net.Conn, error) {
 		return nil, errors.New("dial failed")
 	}
@@ -803,7 +803,7 @@ func TestProcessDeferredStreamSynIgnoresLateDialCompletionAfterSessionClose(t *t
 	s := newTestServerForStreamSyn("TCP")
 	record := newTestSessionRecord(23)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 
 	conn := &testNetConn{}
 	s.dialStreamUpstreamFn = func(network string, address string, timeout time.Duration) (net.Conn, error) {
@@ -847,7 +847,7 @@ func TestProcessDeferredStreamSynTimesOutBlockedDial(t *testing.T) {
 	s.socksConnectTimeout = 50 * time.Millisecond
 	record := newTestSessionRecord(26)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 	s.dialStreamUpstreamFn = func(network string, address string, timeout time.Duration) (net.Conn, error) {
 		time.Sleep(500 * time.Millisecond)
 		return nil, nil
@@ -876,7 +876,7 @@ func TestProcessDeferredStreamSynClearsQueuedDuplicatesAfterDialFailure(t *testi
 	s := newTestServerForStreamSyn("TCP")
 	record := newTestSessionRecord(41)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 	s.dialStreamUpstreamFn = func(network string, address string, timeout time.Duration) (net.Conn, error) {
 		return nil, errors.New("dial failed")
 	}
@@ -929,7 +929,7 @@ func TestProcessDeferredSOCKS5SynTimesOutBlockedDial(t *testing.T) {
 	s.socksConnectTimeout = 50 * time.Millisecond
 	record := newTestSessionRecord(27)
 	record.DownloadCompression = 0
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 	s.dialStreamUpstreamFn = func(network string, address string, timeout time.Duration) (net.Conn, error) {
 		time.Sleep(500 * time.Millisecond)
 		return nil, nil
@@ -959,7 +959,7 @@ func TestProcessDeferredSOCKS5SynTimesOutBlockedDial(t *testing.T) {
 func TestHandlePostSessionPacketRejectsMismatchedSynProtocol(t *testing.T) {
 	s := newTestServerForStreamSyn("SOCKS5")
 	record := newTestSessionRecord(24)
-	s.sessions.byID[record.ID] = record
+	s.sessions.byID[record.ID].Store(record)
 
 	packet := packetWithSession(Enums.PACKET_STREAM_SYN, record.ID, record.Cookie, 4)
 	if handled := s.handlePostSessionPacket(packet, viewForRecord(record)); handled {
