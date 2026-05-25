@@ -139,7 +139,30 @@ type Balancer struct {
 	// that may have only just come back up. 0 disables the ramp-up.
 	cbConsecutiveTimeouts atomic.Uint32
 	reactivationProbation atomic.Int64 // nanoseconds
+
+	// Step 16 — Adaptive duplication.
+	//
+	// The hot path (one decision per outbound DATA packet) only needs a
+	// cheap "what's the recent loss across all active resolvers?" answer.
+	// Recomputing it by walking every snapshot entry on every packet
+	// would re-introduce the contention we eliminated in Step 8, so the
+	// estimate is cached as a fixed-point value (loss × 1000, e.g. 23 →
+	// 2.3%) plus a UnixNano expiry. Readers compare the expiry and use
+	// the cached value if it's still fresh, otherwise they refresh under
+	// a lightweight CAS guard so only one goroutine ever performs the
+	// recomputation per TTL window.
+	globalLossCachePermil    atomic.Int32 // loss × 1000 (0..100000)
+	globalLossCacheSent      atomic.Int64 // aggregate sent at last refresh
+	globalLossCacheExpiresAt atomic.Int64 // UnixNano deadline
+	globalLossCacheBusy      atomic.Bool  // CAS guard against concurrent refresh
 }
+
+// globalLossCacheTTL is how long a cached loss estimate stays fresh.
+// 250 ms is short enough that adaptive duplication can react to a
+// sudden loss spike within a fraction of a second, but long enough
+// that we don't walk the resolver snapshot on every packet under heavy
+// upload bursts.
+const globalLossCacheTTL = 250 * time.Millisecond
 
 type connectionStats struct {
 	sent            atomic.Uint64
@@ -323,6 +346,11 @@ func (b *Balancer) publishLookupSnapshotLocked() {
 	}
 	copy(snap.stats, b.stats)
 	b.lookupSnap.Store(snap)
+	// Step 16 — invalidate the global-loss cache so the next adaptive
+	// duplication check reflects the new resolver set rather than the
+	// previous one. Cheap (one atomic store) and avoids a 250 ms blind
+	// window every time resolvers come and go.
+	b.invalidateGlobalLossCache()
 }
 
 func (b *Balancer) ActiveCount() int {
@@ -2313,6 +2341,90 @@ func (b *Balancer) hybridLatencyPenaltyLocked(idx int) uint64 {
 	}
 
 	return latencyMillis
+}
+
+// GlobalLossPercent returns an estimate of the current loss rate across all
+// resolvers known to the balancer, expressed as a percentage in [0, 100].
+// The second return value reports the total number of "sent" samples that
+// contributed to the estimate — callers can use it as a confidence floor
+// (e.g. ignore the estimate when fewer than N packets have been sent).
+//
+// The implementation is hot-path safe: it consults the lock-free
+// lookupSnapshot published by SetConnections and only walks it when the
+// 250ms cache window has expired. Concurrent callers either return the
+// fresh cached value or, if a refresh is already in flight, return the
+// last-known value rather than serialising on a mutex. Refresh is
+// gated by globalLossCacheBusy (single-flight CAS) so the snapshot walk
+// happens at most once per TTL window.
+//
+// The returned loss value is computed as lost / (acked + lost) when at
+// least one segment has been acked-or-lost, falling back to lost / sent
+// otherwise. This protects against the misleading early-session window
+// where many segments are in-flight (sent counts up, ack/lost are zero)
+// which would otherwise drive the estimate to 0% regardless of the
+// underlying path.
+func (b *Balancer) GlobalLossPercent() (percent float64, sentSamples int64) {
+	if b == nil {
+		return 0, 0
+	}
+
+	now := time.Now().UnixNano()
+	if expiresAt := b.globalLossCacheExpiresAt.Load(); expiresAt > now {
+		return float64(b.globalLossCachePermil.Load()) / 1000.0, b.globalLossCacheSent.Load()
+	}
+
+	if !b.globalLossCacheBusy.CompareAndSwap(false, true) {
+		// Another goroutine is refreshing; return last-known value to
+		// stay off the lock and out of contention with the writer.
+		return float64(b.globalLossCachePermil.Load()) / 1000.0, b.globalLossCacheSent.Load()
+	}
+	defer b.globalLossCacheBusy.Store(false)
+
+	snap := b.lookupSnap.Load()
+	var aggSent, aggAcked, aggLost uint64
+	if snap != nil {
+		for _, stats := range snap.stats {
+			if stats == nil {
+				continue
+			}
+			s, a, l, _, _ := stats.snapshot()
+			aggSent += s
+			aggAcked += a
+			aggLost += l
+		}
+	}
+
+	var pct float64
+	denom := aggAcked + aggLost
+	if denom > 0 {
+		pct = float64(aggLost) * 100.0 / float64(denom)
+	} else if aggSent > 0 {
+		pct = float64(aggLost) * 100.0 / float64(aggSent)
+	}
+
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+
+	b.globalLossCachePermil.Store(int32(pct * 1000))
+	b.globalLossCacheSent.Store(int64(aggSent))
+	b.globalLossCacheExpiresAt.Store(now + int64(globalLossCacheTTL))
+
+	return pct, int64(aggSent)
+}
+
+// invalidateGlobalLossCache forces the next GlobalLossPercent call to
+// recompute from the snapshot rather than return the cached value. Used by
+// tests and by SetConnections (when the resolver set changes the cache
+// would otherwise reflect dead resolvers).
+func (b *Balancer) invalidateGlobalLossCache() {
+	if b == nil {
+		return
+	}
+	b.globalLossCacheExpiresAt.Store(0)
 }
 
 func (s *connectionStats) snapshot() (sent uint64, acked uint64, lost uint64, rttMicrosSum uint64, rttCount uint64) {

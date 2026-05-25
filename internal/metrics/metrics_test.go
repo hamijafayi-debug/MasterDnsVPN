@@ -109,6 +109,8 @@ func TestCollectStableOrder(t *testing.T) {
 		"sessions_active",
 		"cache_hits",
 		"cache_misses",
+		"adaptive_dup_suppressed",
+		"adaptive_dup_applied",
 	}
 	if len(snap) != len(want) {
 		t.Fatalf("snapshot length=%d want %d", len(snap), len(want))

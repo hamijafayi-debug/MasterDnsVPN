@@ -21,6 +21,7 @@ import (
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
+	"masterdnsvpn-go/internal/metrics"
 )
 
 const clientRXDropLogInterval = 2 * time.Second
@@ -29,6 +30,23 @@ type asyncReadPacket struct {
 	data      []byte
 	addr      *net.UDPAddr
 	localAddr string
+}
+
+// isSetupOrControlPacket reports whether the packet type should always honour
+// the configured SetupPacketDuplicationCount and is therefore exempt from
+// the Step 16 adaptive policy. Setup / control packets are exempt because a
+// single dropped SYN or CLOSE costs at least one RTT of stream stall, while
+// a single dropped DATA segment is recovered by ARQ within an RTO.
+func isSetupOrControlPacket(packetType uint8) bool {
+	switch packetType {
+	case Enums.PACKET_STREAM_SYN,
+		Enums.PACKET_PACKED_CONTROL_BLOCKS,
+		Enums.PACKET_SOCKS5_SYN,
+		Enums.PACKET_STREAM_CLOSE_READ,
+		Enums.PACKET_STREAM_CLOSE_WRITE:
+		return true
+	}
+	return false
 }
 
 func (c *Client) runtimePacketDuplicationCount(packetType uint8) int {
@@ -41,11 +59,9 @@ func (c *Client) runtimePacketDuplicationCount(packetType uint8) int {
 		count = 1
 	}
 
-	if packetType == Enums.PACKET_STREAM_SYN ||
-		packetType == Enums.PACKET_PACKED_CONTROL_BLOCKS ||
-		packetType == Enums.PACKET_SOCKS5_SYN ||
-		packetType == Enums.PACKET_STREAM_CLOSE_READ ||
-		packetType == Enums.PACKET_STREAM_CLOSE_WRITE {
+	setupOrControl := isSetupOrControlPacket(packetType)
+
+	if setupOrControl {
 		if c.cfg.SetupPacketDuplicationCount > count {
 			count = c.cfg.SetupPacketDuplicationCount
 		}
@@ -53,6 +69,31 @@ func (c *Client) runtimePacketDuplicationCount(packetType uint8) int {
 
 	if packetType == Enums.PACKET_PING {
 		return min(count, 2)
+	}
+
+	// Step 16 — adaptive duplication.
+	//
+	// When the operator has opted in, we suppress duplication on data-plane
+	// packets while the path is healthy. Setup/control packets and pings are
+	// excluded (handled above). The decision is gated on:
+	//   * a minimum sample size so fresh sessions can't be tricked by a
+	//     single timeout into duplicating everything;
+	//   * a loss threshold the operator can tune to match their willingness
+	//     to trade bandwidth for redundancy.
+	if !setupOrControl && c.cfg.AdaptiveDuplication && count > 1 && c.balancer != nil {
+		lossPct, samples := c.balancer.GlobalLossPercent()
+		minSamples := c.cfg.AdaptiveDuplicationMinSamples
+		if minSamples < 1 {
+			minSamples = 1
+		}
+		if samples >= int64(minSamples) && lossPct < c.cfg.AdaptiveDuplicationLossPercent {
+			metrics.AdaptiveDupSuppressed.Add(1)
+			return 1
+		}
+		// Path is either still cold (not enough samples) or loss is above
+		// the threshold — keep the configured duplication. Account the
+		// "applied" decision separately so operators can see the ratio.
+		metrics.AdaptiveDupApplied.Add(1)
 	}
 
 	return count

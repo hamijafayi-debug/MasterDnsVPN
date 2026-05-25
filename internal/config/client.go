@@ -47,6 +47,24 @@ type ClientConfig struct {
 	ResolverBalancingStrategy             int               `toml:"RESOLVER_BALANCING_STRATEGY"`
 	PacketDuplicationCount                int               `toml:"PACKET_DUPLICATION_COUNT"`
 	SetupPacketDuplicationCount           int               `toml:"SETUP_PACKET_DUPLICATION_COUNT"`
+	// Step 16 — Adaptive duplication policy.
+	//   * AdaptiveDuplication: when true, the per-data-packet duplication
+	//     count is suppressed to 1 whenever the recently-observed loss
+	//     across active resolvers is below AdaptiveDuplicationLossPercent.
+	//     Setup/control packets are NOT affected — they always honour
+	//     SetupPacketDuplicationCount because losing a setup packet costs
+	//     a full RTT.
+	//   * AdaptiveDuplicationLossPercent: the loss percentage threshold
+	//     (0..100). When estimated loss is at or above this value, the
+	//     configured PacketDuplicationCount is used unchanged. Default 2.0%.
+	//   * AdaptiveDuplicationMinSamples: minimum aggregate sent count
+	//     across active resolvers before the adaptive decision kicks in.
+	//     Below this we keep the configured duplication count so that
+	//     fresh sessions / quick bursts aren't gambling on a single send.
+	//     Default 50.
+	AdaptiveDuplication                   bool              `toml:"ADAPTIVE_DUPLICATION"`
+	AdaptiveDuplicationLossPercent        float64           `toml:"ADAPTIVE_DUPLICATION_LOSS_PERCENT"`
+	AdaptiveDuplicationMinSamples         int               `toml:"ADAPTIVE_DUPLICATION_MIN_SAMPLES"`
 	StreamResolverFailoverResendThreshold int               `toml:"STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD"`
 	StreamResolverFailoverCooldownSec     float64           `toml:"STREAM_RESOLVER_FAILOVER_COOLDOWN"`
 	RecheckInactiveServersEnabled         bool              `toml:"RECHECK_INACTIVE_SERVERS_ENABLED"`
@@ -180,6 +198,12 @@ func defaultClientConfig() ClientConfig {
 		ResolverBalancingStrategy:             2,
 		PacketDuplicationCount:                2,
 		SetupPacketDuplicationCount:           2,
+		// Step 16 — disabled by default to preserve legacy behaviour
+		// (constant duplication). Operators opt-in when they want to
+		// trade redundancy for bandwidth on low-loss paths.
+		AdaptiveDuplication:                   false,
+		AdaptiveDuplicationLossPercent:        2.0,
+		AdaptiveDuplicationMinSamples:         50,
 		StreamResolverFailoverResendThreshold: 2,
 		StreamResolverFailoverCooldownSec:     2.5,
 		RecheckInactiveServersEnabled:         true,
@@ -452,6 +476,23 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 
 	cfg.PacketDuplicationCount = clampInt(defaultIntBelow(cfg.PacketDuplicationCount, 1, 2), 1, 10)
 	cfg.SetupPacketDuplicationCount = clampInt(defaultIntBelow(cfg.SetupPacketDuplicationCount, 1, max(2, cfg.PacketDuplicationCount)), cfg.PacketDuplicationCount, 12)
+	// Step 16 — clamp adaptive duplication knobs. Loss percent is bounded
+	// to [0, 100]; min-samples to [1, 100000]. We don't enforce a "default
+	// when zero" here because zero loss-percent is a legitimate (always
+	// suppress) setting and zero min-samples would defeat the purpose; we
+	// just floor it.
+	if cfg.AdaptiveDuplicationLossPercent < 0 {
+		cfg.AdaptiveDuplicationLossPercent = 0
+	}
+	if cfg.AdaptiveDuplicationLossPercent > 100 {
+		cfg.AdaptiveDuplicationLossPercent = 100
+	}
+	if cfg.AdaptiveDuplicationMinSamples < 1 {
+		cfg.AdaptiveDuplicationMinSamples = 1
+	}
+	if cfg.AdaptiveDuplicationMinSamples > 100000 {
+		cfg.AdaptiveDuplicationMinSamples = 100000
+	}
 	cfg.StreamResolverFailoverResendThreshold = clampInt(defaultIntBelow(cfg.StreamResolverFailoverResendThreshold, 1, 2), 1, 256)
 	cfg.StreamResolverFailoverCooldownSec = clampFloat(defaultFloatAtMostZero(cfg.StreamResolverFailoverCooldownSec, 2.5), 0.1, 120.0)
 	cfg.AutoDisableTimeoutWindowSeconds = clampFloat(defaultFloatAtMostZero(cfg.AutoDisableTimeoutWindowSeconds, 30.0), 1.0, 86400.0)

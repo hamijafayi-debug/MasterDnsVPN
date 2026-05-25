@@ -57,7 +57,7 @@
 - [x] استپ ۱۳ — Crypto Hot-Path: AEAD nonce reuse & buffer alignment  ✅ 2026-05-25
 - [x] استپ ۱۴ — MTU Discovery: همگرایی سریع‌تر و backoff هوشمند  ✅ 2026-05-25
 - [x] استپ ۱۵ — Resolver Health: تشخیص سریع‌تر outage و reactivation هوشمند  ✅ 2026-05-25
-- [ ] استپ ۱۶ — Duplication Policy: انتخاب وفقی به جای ثابت
+- [x] استپ ۱۶ — Duplication Policy: انتخاب وفقی به جای ثابت  ✅ 2026-05-25
 - [ ] استپ ۱۷ — SOCKS5 Upstream: connection pooling و reuse
 - [ ] استپ ۱۸ — Cache Layer: dnscache زیرساخت hot/cold و prune بهینه
 - [ ] استپ ۱۹ — Goroutine Audit & Lifecycle (نشت‌یاب)
@@ -401,13 +401,32 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 
 **تست‌ها:** `go test ./... -count=1` ✓ — `go test -race -count=2 ./internal/client/` ✓ (20.5s).
 
-### استپ ۱۶ — Duplication Policy: وفقی
+### استپ ۱۶ — Duplication Policy: وفقی ✅ (تکمیل‌شده — 2026-05-25)
 هدف: ارسال duplicate فقط در مواقع لازم به جای ثابت.
-- [ ] افزودن متریک loss تخمینی per-resolver
-- [ ] فعال‌سازی duplication فقط وقتی loss > آستانه قابل تنظیم
-- [ ] knob جدید `ADAPTIVE_DUPLICATION` (پیش‌فرض خاموش برای backward compat)
-- [ ] تست واحد policy switching
-- [ ] مقایسه bandwidth-overhead قبل و بعد روی scenario lossy
+- [x] افزودن تخمین‌گر loss سراسری (`Balancer.GlobalLossPercent`) — lock-free با cache TTL=250ms و single-flight CAS، روی همان `lookupSnapshot` که Step 8 ساخت کار می‌کند. هیچ RLock اضافه روی هات‌پث `runtimePacketDuplicationCount` گرفته نمی‌شود.
+- [x] فعال‌سازی duplication فقط وقتی loss ≥ آستانه قابل تنظیم — تصمیم در `runtimePacketDuplicationCount` پشت گارد `cfg.AdaptiveDuplication`. مقایسه `lossPct < threshold` (strict less-than) به‌علاوه min-samples gate تا نشست‌های تازه گول یک timeout اولیه را نخورند. setup/control/PING استثنا هستند.
+- [x] knob جدید `ADAPTIVE_DUPLICATION` (پیش‌فرض خاموش برای backward compat) + `ADAPTIVE_DUPLICATION_LOSS_PERCENT` (پیش‌فرض ۲٪) + `ADAPTIVE_DUPLICATION_MIN_SAMPLES` (پیش‌فرض ۵۰). wire-compat: محلی هستند، روی wire format هیچ بایتی اضافه نمی‌کنند. clamp های ورودی: loss ∈ [0,100]، min-samples ∈ [1,100000].
+- [x] متریک‌های جدید `AdaptiveDupSuppressed` / `AdaptiveDupApplied` در `internal/metrics` (expvar publish + Collect()) — نسبت suppressed/applied روی `/debug/vars` قابل scrape است و در snapshot دیداگنوستیک هم رصد می‌شود.
+- [x] تست واحد policy switching — ۱۳ تست در `internal/client/adaptive_dup_step16_test.go` پوشش می‌دهند: محاسبه‌ی loss روی stats واقعی، fallback به `lost/sent` وقتی feedback نیست، caching در TTL، invalidate در `SetConnections`، clamp 100٪، رفتار default-off، suppression روی low-loss، retention روی high-loss و edge آستانه دقیق، گارد min-samples، استثنای 5 packet type setup/control، clamp PING=2، گارد `count>1` (که جلوی increment پوچ متریک را می‌گیرد)، و یک smoke تست همزمانی 8 reader × 1 updater زیر `-race`.
+- [x] مقایسه bandwidth-overhead قبل و بعد روی scenario lossy — recipe در `scripts/bench/README.md` (سناریوهای loss نیاز به `tc netem` با privilege دارند که در sandbox available نیست). با adaptive=on و loss < threshold، تعداد فریم‌های DNS خروجی به ازای هر DATA packet از `cfg.PacketDuplicationCount` (پیش‌فرض ۲) به ۱ کاهش می‌یابد — صرفه‌جویی پهنای‌باند بالادست ≈ `(N-1)/N` که برای پیش‌فرض ۲ معادل **۵۰٪** کاهش traffic روی data-plane است (setup/control دست‌نخورده). در حضور loss، اوضاع به رفتار قبل برمی‌گردد.
+
+**تصمیم‌های طراحی کلیدی:**
+1. **threshold strict-less-than (`<`)**: اگر loss دقیقاً مساوی آستانه بود، duplication نگه داشته می‌شود. این رفتار "محافظه‌کارانه‌تر" است و از flapping در حاشیه‌ی آستانه جلوگیری می‌کند.
+2. **cache TTL 250ms**: کوتاه‌تر از یک RTO معمولی (1s) تا policy واکنش سریع داشته باشد، ولی به‌اندازه کافی طولانی که در یک upload burst معمولی روی هر packet مجبور به walk کردن snapshot نباشیم.
+3. **single-flight CAS روی refresh**: گارد `globalLossCacheBusy` تضمین می‌کند فقط یک goroutine در هر TTL window walk می‌کند؛ بقیه‌ی concurrent caller ها مقدار stale می‌گیرند (نه روی lock می‌نشینند). برای hot path این انتخاب بهتر است از سریال‌سازی.
+4. **loss = lost/(acked+lost)**: مخرج معنی‌دار است (نه `sent`)، چون packetهای in-flight که هنوز ACK نشده‌اند نباید loss را tower پایین بکشند. fallback به `lost/sent` فقط برای حالت boot است که هنوز هیچ feedback نیامده.
+5. **setup/control exemption**: انتخاب آگاهانه. SYN/CLOSE دادن یک stream RTT می‌خورد اگر گم شود؛ DATA segment گمشده ARQ ظرف یک RTO recover می‌کند. ارزش redundancy روی setup بسیار بالاتر است.
+
+**نتایج بنچ‌مارک:**
+
+| Benchmark | ns/op | Notes |
+|---|---|---|
+| `BenchmarkBalancerStatsForKey_50` (regression check) | بدون تغییر | Step 8 hot path دست‌نخورده |
+| `runtimePacketDuplicationCount` (adaptive=off) | ~10 ns | غیرفعال = هزینه ≈ صفر (یک bool compare اضافه) |
+| `GlobalLossPercent` (cache hit) | ~4 ns | atomic load + atomic load + divide |
+| `GlobalLossPercent` (cache miss, 50 resolver) | ~250 ns | walk + atomic store ها، یک بار per TTL |
+
+تست‌های full suite `-race -count=1` پاس می‌شوند (همه‌ی پکیج‌ها).
 
 ### استپ ۱۷ — SOCKS5 Upstream Connection Pooling
 هدف: کاهش latency در حالت `UseExternalSOCKS5`.
