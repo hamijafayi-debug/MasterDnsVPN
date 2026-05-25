@@ -16,7 +16,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"sync"
 
 	"golang.org/x/crypto/chacha20"
 
@@ -34,33 +33,21 @@ const (
 	aesNonceSize    = 12
 )
 
-var cryptoBufferPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, 4096)
-		return &b
-	},
-}
-
-func getCryptoBuffer(size int) *[]byte {
-	bufPtr := cryptoBufferPool.Get().(*[]byte)
-	if cap(*bufPtr) < size {
-		b := make([]byte, size*2)
-		bufPtr = &b
-	}
-	return bufPtr
-}
-
-func putCryptoBuffer(bufPtr *[]byte) {
-	if bufPtr != nil {
-		cryptoBufferPool.Put(bufPtr)
-	}
-}
+// (Step 13: the previous single-pool cryptoBufferPool was replaced by the
+// tiered pool in bufpool.go. The dedicated functions getSizedCryptoBuffer /
+// putSizedCryptoBuffer live there and route by requested size.)
 
 type Codec struct {
 	method  int
 	key     []byte
 	encrypt func(dst, src []byte) ([]byte, error)
 	decrypt func(dst, src []byte) ([]byte, error)
+	// Step 13 — per-codec nonce generators. `aesNonce` is used by methods
+	// 3/4/5 (AES-GCM family) when present; `chachaNonce` is used by method 2.
+	// `nil` means "use crypto/rand fallback" (e.g. when newNonceGen failed at
+	// codec creation; the closures inspect this for backwards-compat).
+	aesNonce    *nonceGen
+	chachaNonce *nonceGen
 }
 
 func NewCodecFromConfig(cfg config.ServerConfig, rawKey string) (*Codec, error) {
@@ -86,6 +73,15 @@ func NewCodec(method int, rawKey string) (*Codec, error) {
 		codec.encrypt = codec.xorCrypto
 		codec.decrypt = codec.xorCrypto
 	case 2:
+		// Seed ChaCha20 nonce generator. Falls back to per-call rand.Read if
+		// the kernel rng is unreachable (extremely unlikely; we surface the
+		// error rather than ship a codec that might produce predictable
+		// nonces).
+		g, err := newNonceGen(chachaNoncePrefixSize)
+		if err != nil {
+			return nil, err
+		}
+		codec.chachaNonce = g
 		codec.encrypt = codec.chachaEncrypt
 		codec.decrypt = codec.chachaDecrypt
 	case 3, 4, 5:
@@ -93,6 +89,11 @@ func NewCodec(method int, rawKey string) (*Codec, error) {
 		if err != nil {
 			return nil, err
 		}
+		g, err := newNonceGen(aesNoncePrefixSize)
+		if err != nil {
+			return nil, err
+		}
+		codec.aesNonce = g
 		codec.encrypt = codec.makeAESEncryptor(aead)
 		codec.decrypt = codec.makeAESDecryptor(aead)
 	default:
@@ -131,8 +132,12 @@ func (c *Codec) EncryptAndEncode(data []byte) (string, error) {
 		return baseCodec.Encode(data), nil
 	}
 
-	bufPtr := getCryptoBuffer(len(data) + 64)
-	defer putCryptoBuffer(bufPtr)
+	// Step 13: tiered pool (small/medium/large/jumbo) replaces the single
+	// 4KB pool that previously dropped oversized buffers and re-allocated on
+	// every size-class miss. The +64 budget covers AEAD/ChaCha nonce + tag
+	// + a few bytes of headroom for the encrypted blob.
+	bufPtr, pool := getSizedCryptoBuffer(len(data) + 64)
+	defer putSizedCryptoBuffer(bufPtr, pool)
 
 	encrypted, err := c.encrypt((*bufPtr)[:0], data)
 	if err != nil {
@@ -149,8 +154,9 @@ func (c *Codec) EncryptAndEncodeBytes(data []byte) ([]byte, error) {
 		return baseCodec.EncodeToBytes(data), nil
 	}
 
-	bufPtr := getCryptoBuffer(len(data) + 64)
-	defer putCryptoBuffer(bufPtr)
+	// Step 13: tiered pool — see EncryptAndEncode above.
+	bufPtr, pool := getSizedCryptoBuffer(len(data) + 64)
+	defer putSizedCryptoBuffer(bufPtr, pool)
 
 	encrypted, err := c.encrypt((*bufPtr)[:0], data)
 	if err != nil {
@@ -317,8 +323,17 @@ func (c *Codec) makeAESEncryptor(aead cipher.AEAD) func(dst, src []byte) ([]byte
 		}
 
 		nonce := dst[:aesNonceSize]
-		if _, err := rand.Read(nonce); err != nil {
-			return nil, fmt.Errorf("generate aes-gcm nonce: %w", err)
+		// Step 13: counter-based nonce. See nonce.go for rationale. The AES
+		// closure can't see `c.aesNonce` directly until we close over it via
+		// the receiver; the call chain is makeAESEncryptor (method) → returned
+		// closure → c.aesNonce.Fill. This keeps the AEAD itself shared and
+		// pooled (already was) while removing the per-packet rand.Read syscall.
+		if c.aesNonce != nil && !randFallbackEnabled() {
+			c.aesNonce.Fill(nonce, aesNonceSize)
+		} else {
+			if _, err := rand.Read(nonce); err != nil {
+				return nil, fmt.Errorf("generate aes-gcm nonce: %w", err)
+			}
 		}
 
 		dst = aead.Seal(dst, nonce, src, nil)

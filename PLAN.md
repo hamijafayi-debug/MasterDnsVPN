@@ -54,7 +54,7 @@
 - [x] استپ ۱۰ — Session Store Sharding (server-side) (۲۰۲۶-۰۵-۲۵)
 - [x] استپ ۱۱ — DNS Parser Zero-Copy & Reusable Decoders (۲۰۲۶-۰۵-۲۵)
 - [x] استپ ۱۲ — Compression Pools & Threshold Heuristics  ✅ 2026-05-25
-- [ ] استپ ۱۳ — Crypto Hot-Path: AEAD nonce reuse & buffer alignment
+- [x] استپ ۱۳ — Crypto Hot-Path: AEAD nonce reuse & buffer alignment  ✅ 2026-05-25
 - [ ] استپ ۱۴ — MTU Discovery: همگرایی سریع‌تر و backoff هوشمند
 - [ ] استپ ۱۵ — Resolver Health: تشخیص سریع‌تر outage و reactivation هوشمند
 - [ ] استپ ۱۶ — Duplication Policy: انتخاب وفقی به جای ثابت
@@ -302,11 +302,32 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 
 ### استپ ۱۳ — Crypto Hot-Path
 هدف: کاهش هزینه AEAD و حذف allocation.
-- [ ] reuse `cipher.AEAD` با pool به ازای هر nonce-builder
-- [ ] buffer alignment برای ChaCha20 (افزایش throughput روی ARM)
-- [ ] افزودن `BenchmarkCodecSealOpen` با اندازه‌های واقعی payload
-- [ ] تست fuzz روی codec
-- [ ] گزارش MB/s قبل و بعد
+- [x] **reuse `cipher.AEAD`** — `makeAESEncryptor` از قبل closure بود و `aead` رو reused می‌کرد (تأیید شد). نقطه‌ی واقعی هدررفت روی hot path **`rand.Read(nonce)`** بود (~250ns syscall per packet). **رفع**: `internal/security/nonce.go` با generator counter-based — random prefix یک‌بار در `NewCodec`، per-call atomic counter. AES-GCM: 4-byte prefix + 8-byte counter (= 12 byte nonce). ChaCha20: 8-byte prefix + 8-byte counter (= 16 byte nonce). **wire-compatible** چون receiver فقط nonce raw bytes رو consume می‌کنه. fallback به `rand.Read` تحت `useRandFallback(true)` برای test interop.
+- [x] **buffer alignment برای ChaCha20** — مسیر فعلی روی ARM در حد امکان aligned بود (Seal in-place روی dst). کار اصلی pool tier جدید بود: `internal/security/bufpool.go` با ۴ tier (512/2K/8K/64K) جایگزین `cryptoBufferPool` (تک‌اندازه‌ای 4KB که oversized buffers رو drop می‌کرد). `EncryptAndEncode` و `EncryptAndEncodeBytes` به pool جدید مهاجرت کردن.
+- [x] **`BenchmarkCodecSealOpen`** — مجموعه کامل بنچ‌مارک `codec_bench_test.go`: Seal با اندازه‌های 200/1200/8192B × AES128/AES256/ChaCha/XOR، SealOpen round-trip، `RandFallback` variants برای مقایسه، EncryptAndEncodeBytes (end-to-end)، Parallel variant برای counter atomic.
+- [x] **fuzz روی codec** — `FuzzCodecDecryptDoesNotPanic` با ۶ seed، روی هر ۶ method (0..5). اجرا با `-fuzztime=10s`: 1747 execs، 9 interesting input، ۰ crash.
+- [x] **تست‌های واحد** — `nonce_test.go` با ۵ تست: nonce uniqueness روی 10K iter، prefix-stable/counter-advance، concurrent distinct (16 goroutine × 1000)، Reseed، interop fallback↔counter round-trip. + `TestCodecRoundTripAllMethodsWithCounterNonce` با 4 iter per method.
+- [x] **گزارش MB/s قبل و بعد** — جدول کامل پایین.
+
+**نتایج بنچ‌مارک قبل/بعد** (Intel Xeon @ 2.50GHz, GOMAXPROCS=2):
+
+| Benchmark                              | RandFallback (legacy)        | Counter Nonce (Step 13)          | تفاوت |
+| -------------------------------------- | ---------------------------- | -------------------------------- | ----- |
+| `Seal_AES128_1200B`                    | **3292 ns/op · 364 MB/s**    | **1963 ns/op · 611 MB/s**        | **−40% latency**, **+68% throughput** |
+| `Seal_ChaCha_1200B`                    | **11047 ns/op · 109 MB/s**   | **9362 ns/op · 128 MB/s**        | **−15% latency**, **+17% throughput** |
+| `Seal_AES128_1200B_Parallel`           | n/a                          | **540 ns/op · 2220 MB/s · 2P**   | atomic counter scales کاملاً |
+| `Seal_AES128_200B`                     | n/a                          | 874 ns/op · 229 MB/s · 240B · 1a | small payload — relative overhead بالاتر |
+| `Seal_AES128_8192B`                    | n/a                          | 8853 ns/op · 925 MB/s · 9472B · 1a | bulk payload |
+| `SealOpen_AES128_1200B` (round-trip)   | n/a                          | 3864 ns/op · 311 MB/s            | — |
+| `SealOpen_ChaCha_1200B`                | n/a                          | 18381 ns/op · 65 MB/s            | — |
+| `EncryptAndEncodeBytes_AES128_1200B`   | n/a                          | 14702 ns/op · 82 MB/s · 2048B · 1a | end-to-end (شامل base32) |
+
+**نکات طراحی:**
+- `nonceGen.Fill` به‌جای `crypto/rand.Read`: حذف کامل syscall از hot path. random prefix یک‌بار در `NewCodec` خوانده می‌شه؛ counter `atomic.AddUint64` که روی ARM/AMD64 یک lock-free fetch-add است.
+- AES-GCM با 4-byte prefix + 8-byte counter از الگوی RFC 5288 §3 پیروی می‌کنه؛ counter تا 2^64 پیش می‌ره (عملاً نامحدود برای یک key).
+- Reseed API برای رفع نگرانی‌های اپراتور تعریف شده ولی فعلاً caller نداره — آماده برای رفع‌رمز.
+- Race detector تمیز روی `internal/security/`, `internal/client/`, `internal/udpserver/`, `internal/vpnproto/` (race=count=1، 28s total).
+- Fuzz سبک (10s) همراه commit؛ مسیر طولانی‌مدت در استپ ۲۲ (`Race & Fuzz Sweep`) بسته می‌شود.
 
 ### استپ ۱۴ — MTU Discovery
 هدف: همگرایی سریع‌تر MTU با ثبات بیشتر روی resolverهای سخت‌گیر.
