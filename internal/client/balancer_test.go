@@ -1,6 +1,9 @@
 package client
 
 import (
+	"fmt"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -461,4 +464,167 @@ func TestBalancerSetConnectionMTUUpdatesBalancerOnly(t *testing.T) {
 	if got.UploadMTUBytes != 90 || got.UploadMTUChars != 135 || got.DownloadMTUBytes != 180 {
 		t.Fatalf("expected snapshot MTUs to update, got up=%d chars=%d down=%d", got.UploadMTUBytes, got.UploadMTUChars, got.DownloadMTUBytes)
 	}
+}
+
+// --- Step 8: Balancer lock granularity & selection fast-path ---
+
+// makeBalancerWithN sets up a balancer with N active resolvers named
+// "r0".."r{N-1}". Used by Step 8 benchmarks and invariant tests.
+func makeBalancerWithN(strategy int, n int) *Balancer {
+	b := NewBalancer(strategy, nil)
+	conns := make([]*Connection, n)
+	for i := 0; i < n; i++ {
+		conns[i] = &Connection{Key: "r" + strconv.Itoa(i), IsValid: true}
+	}
+	b.SetConnections(conns)
+	for i := 0; i < n; i++ {
+		_ = b.SetConnectionValidity(conns[i].Key, true)
+	}
+	return b
+}
+
+// TestBalancerStatsForKeySnapshotInvariant asserts that the lock-free
+// statsForKey path returns the SAME *connectionStats pointer as the
+// locked fallback for every resolver, and stays consistent under
+// concurrent ReportSuccess calls. This protects the Step 8 snapshot
+// optimisation from drifting from the canonical state.
+func TestBalancerStatsForKeySnapshotInvariant(t *testing.T) {
+	const n = 50
+	b := makeBalancerWithN(BalancingHybridScore, n)
+
+	for i := 0; i < n; i++ {
+		key := "r" + strconv.Itoa(i)
+		got := b.statsForKey(key)
+		if got == nil {
+			t.Fatalf("expected non-nil stats for %s", key)
+		}
+		// Compare against the locked view.
+		b.mu.RLock()
+		idx, ok := b.indexByKey[key]
+		if !ok {
+			b.mu.RUnlock()
+			t.Fatalf("indexByKey missing %s", key)
+		}
+		expected := b.stats[idx]
+		b.mu.RUnlock()
+		if got != expected {
+			t.Fatalf("snapshot drift for %s: got %p, locked %p", key, got, expected)
+		}
+	}
+
+	// Hammer the snapshot path concurrently with reports.
+	var wg sync.WaitGroup
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func(seed int) {
+			defer wg.Done()
+			for i := 0; i < 2000; i++ {
+				key := "r" + strconv.Itoa((seed*7+i)%n)
+				b.ReportSend(key)
+				b.ReportSuccess(key, 5*time.Millisecond)
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	// Sanity-check that counters survived (sent should equal acked since
+	// every send is followed by a success in the loop above).
+	for i := 0; i < n; i++ {
+		key := "r" + strconv.Itoa(i)
+		st := b.statsForKey(key)
+		if st == nil {
+			t.Fatalf("post-load: nil stats for %s", key)
+		}
+		sent := st.sent.Load()
+		acked := st.acked.Load()
+		if sent == 0 || sent != acked {
+			t.Fatalf("post-load: %s sent=%d acked=%d (want equal & non-zero)", key, sent, acked)
+		}
+	}
+}
+
+// TestBalancerStatsForKeyMissingKeyReturnsNil locks in the contract
+// that a key absent from the snapshot returns nil (not a panic).
+func TestBalancerStatsForKeyMissingKeyReturnsNil(t *testing.T) {
+	b := makeBalancerWithN(BalancingHybridScore, 4)
+	if got := b.statsForKey("nope"); got != nil {
+		t.Fatalf("expected nil for absent key, got %p", got)
+	}
+}
+
+// TestBalancerSetConnectionsRepublishesSnapshot verifies that calling
+// SetConnections a second time atomically swaps the lookup snapshot:
+// the new key resolves, the old key returns nil.
+func TestBalancerSetConnectionsRepublishesSnapshot(t *testing.T) {
+	b := NewBalancer(BalancingHybridScore, nil)
+	b.SetConnections([]*Connection{{Key: "old", IsValid: true}})
+	if b.statsForKey("old") == nil {
+		t.Fatal("expected stats for old key on first publish")
+	}
+	b.SetConnections([]*Connection{{Key: "new", IsValid: true}})
+	if b.statsForKey("old") != nil {
+		t.Fatal("expected nil for old key after republish")
+	}
+	if b.statsForKey("new") == nil {
+		t.Fatal("expected stats for new key after republish")
+	}
+}
+
+// BenchmarkBalancerSelect_50 measures GetBestConnection throughput with
+// 50 active resolvers under the default hybrid strategy. This is the
+// canonical Step 8 selection fast-path bench.
+func BenchmarkBalancerSelect_50(b *testing.B) {
+	bal := makeBalancerWithN(BalancingHybridScore, 50)
+	// Seed some scoring signal so the hybrid scorer is exercised
+	// rather than the no-signal round-robin fallback.
+	for i := 0; i < 50; i++ {
+		key := "r" + strconv.Itoa(i)
+		bal.ReportSend(key)
+		bal.ReportSuccess(key, time.Duration(5+i)*time.Millisecond)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = bal.GetBestConnection()
+	}
+}
+
+// BenchmarkBalancerStatsForKey_50 measures the lock-free hot-path
+// lookup. This is what every per-packet ReportSend / ReportSuccess
+// goes through.
+func BenchmarkBalancerStatsForKey_50(b *testing.B) {
+	bal := makeBalancerWithN(BalancingHybridScore, 50)
+	keys := make([]string, 50)
+	for i := range keys {
+		keys[i] = "r" + strconv.Itoa(i)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = bal.statsForKey(keys[i%len(keys)])
+	}
+}
+
+// BenchmarkBalancerReportSuccessParallel_50 stresses the hottest entry
+// point under contention. Pre-Step-8 this took the RWMutex on every
+// call; post-Step-8 it is lock-free and the parallel scaling should be
+// near-linear.
+func BenchmarkBalancerReportSuccessParallel_50(b *testing.B) {
+	bal := makeBalancerWithN(BalancingHybridScore, 50)
+	keys := make([]string, 50)
+	for i := range keys {
+		keys[i] = "r" + strconv.Itoa(i)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			key := keys[i%len(keys)]
+			bal.ReportSuccess(key, 7*time.Millisecond)
+			i++
+		}
+	})
+	// Touch fmt so we keep the import in case future tweaks need it.
+	_ = fmt.Sprintf
 }

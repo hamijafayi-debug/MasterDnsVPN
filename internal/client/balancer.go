@@ -77,6 +77,19 @@ type balancerPendingShard struct {
 	pending map[balancerResolverSampleKey]balancerResolverSample
 }
 
+// balancerLookupSnapshot is the immutable lookup table consulted by the
+// per-packet hot path (statsForKey, GetConnectionByKey when fast-path is
+// taken, etc.). It is published once via SetConnections and then never
+// mutated — every subsequent SetConnections allocates a fresh snapshot
+// and atomic-swaps the pointer. Readers can therefore consult it
+// without taking b.mu, eliminating RLock contention on the hottest
+// resolver-stats path. Note: stats entries themselves are *connectionStats
+// with atomic.* fields, so concurrent counter updates are safe.
+type balancerLookupSnapshot struct {
+	indexByKey map[string]int
+	stats      []*connectionStats
+}
+
 type Balancer struct {
 	strategy         int
 	rrCounter        atomic.Uint64
@@ -86,6 +99,11 @@ type Balancer struct {
 	pendingOverflow  atomic.Bool
 	pendingSize      atomic.Int32
 	pendingEvictRR   atomic.Uint32
+
+	// lookupSnap mirrors (indexByKey, stats) in an immutable snapshot.
+	// Hot-path readers (statsForKey) load this without holding b.mu.
+	// Writers (SetConnections) publish a brand-new snapshot atomically.
+	lookupSnap atomic.Pointer[balancerLookupSnapshot]
 
 	mu           sync.RWMutex
 	log          *logger.Logger
@@ -229,6 +247,23 @@ func (b *Balancer) SetConnections(connections []*Connection) {
 		b.stats = append(b.stats, &connectionStats{})
 	}
 
+	b.publishLookupSnapshotLocked()
+}
+
+// publishLookupSnapshotLocked builds a fresh immutable snapshot of
+// (indexByKey, stats) and atomic-swaps it into b.lookupSnap so hot-path
+// readers (statsForKey) can read without taking b.mu. Caller MUST hold
+// b.mu (write lock).
+func (b *Balancer) publishLookupSnapshotLocked() {
+	snap := &balancerLookupSnapshot{
+		indexByKey: make(map[string]int, len(b.indexByKey)),
+		stats:      make([]*connectionStats, len(b.stats)),
+	}
+	for k, v := range b.indexByKey {
+		snap.indexByKey[k] = v
+	}
+	copy(snap.stats, b.stats)
+	b.lookupSnap.Store(snap)
 }
 
 func (b *Balancer) ActiveCount() int {
@@ -1228,14 +1263,27 @@ func (b *Balancer) removeInactiveIndexLocked(idx int) {
 }
 
 func (b *Balancer) statsForKey(serverKey string) *connectionStats {
+	// Hot path: every per-packet ReportSend/ReportSuccess/ReportTimeout
+	// lands here. Reading from the immutable lookupSnap pointer keeps us
+	// off b.mu entirely. The snapshot map and slice are never mutated
+	// once published, so a lock-free read is safe; per-resolver counters
+	// inside *connectionStats are themselves atomic.* fields. Fallback
+	// to the locked path only if no snapshot has been published yet
+	// (i.e. SetConnections hasn't run), which is a one-off boot case.
+	if snap := b.lookupSnap.Load(); snap != nil {
+		idx, ok := snap.indexByKey[serverKey]
+		if !ok || idx < 0 || idx >= len(snap.stats) {
+			return nil
+		}
+		return snap.stats[idx]
+	}
+
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-
 	idx, ok := b.indexByKey[serverKey]
 	if !ok || idx < 0 || idx >= len(b.stats) {
 		return nil
 	}
-
 	return b.stats[idx]
 }
 

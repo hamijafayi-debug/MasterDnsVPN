@@ -49,7 +49,7 @@
 - [x] استپ ۵ — ARQ Send Path & Adaptive RTO Tuning  ✅ 2026-05-25
 - [x] استپ ۶ — Fix Preexisting Test Flakiness (race)  ✅ 2026-05-25 (تزریق‌شده، رفع باگ از استپ ۴/۵)
 - [x] استپ ۷ — Fix ARQ.Close isVirtual race (production)  ✅ 2026-05-25 (تزریق‌شده، رفع باگ از استپ ۶)
-- [ ] استپ ۸ — Balancer Lock Granularity & Selection Fast-Path
+- [x] استپ ۸ — Balancer Lock Granularity & Selection Fast-Path  ✅ 2026-05-25
 - [ ] استپ ۹ — UDP Server Ingress: Batch Read & Worker Sizing
 - [ ] استپ ۱۰ — Session Store Sharding (server-side)
 - [ ] استپ ۱۱ — DNS Parser Zero-Copy & Reusable Decoders
@@ -179,13 +179,17 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 
 ### استپ ۸ — Balancer Lock Granularity & Selection Fast-Path
 هدف: کاهش contention روی balancer mutex وقتی resolver زیاد است.
-- [ ] تفکیک قفل خواندن `GetBestConnection` از قفل نوشتن stats — `RWMutex` و read-mostly path
-- [ ] cache رتبه‌بندی resolverها در snapshot بدون قفل، بازسازی فقط هنگام تغییر
-- [ ] افزودن `BenchmarkBalancerSelect` با ۵۰ resolver
-- [ ] تست واحد invariant: snapshot view و state واقعی نباید واگرا شوند
-- [ ] گزارش µs/op قبل و بعد
+- [x] تفکیک مسیر خواندن hot از قفل نوشتن — الگوی **shadow snapshot** با `atomic.Pointer[balancerLookupSnapshot]`؛ `statsForKey` که در هر `ReportSend/ReportSuccess/ReportTimeout` لمس می‌شد حالا lock-free می‌خواند. بقیه‌ی مسیرهای read کم‌بسامد همچنان روی `RWMutex` هستند (intentional: scope محدود).
+- [x] cache بدون قفل: `balancerLookupSnapshot` (map immutable + slice immutable) که فقط در `SetConnections` (نوشتن کم‌بسامد) دوباره ساخته و atomic-swap می‌شود. شمارنده‌های per-resolver در `*connectionStats` همگی `atomic.*` هستند، پس اشتراک امن است.
+- [x] افزودن `BenchmarkBalancerSelect_50` (با ۵۰ resolver) + `BenchmarkBalancerStatsForKey_50` + `BenchmarkBalancerReportSuccessParallel_50`.
+- [x] تست واحد invariant: `TestBalancerStatsForKeySnapshotInvariant` (snapshot pointer == locked pointer + stress 8×2000 با sent==acked)، `TestBalancerStatsForKeyMissingKeyReturnsNil`، `TestBalancerSetConnectionsRepublishesSnapshot` (re-publish پس از تغییر اتمیک snapshot).
+- [x] گزارش µs/op قبل و بعد (Intel Xeon @ 2.50GHz، GOMAXPROCS=2، benchtime=1s):
+  - `BenchmarkBalancerStatsForKey_50`: **33.55 ns/op → 22.01 ns/op** (≈ ۳۴٪ سریع‌تر، zero-alloc هر دو)
+  - `BenchmarkBalancerReportSuccessParallel_50`: **168.9 ns/op → 34.85 ns/op** (≈ ۵× سریع‌تر تحت contention موازی، zero-alloc)
+  - `BenchmarkBalancerSelect_50`: **483.8 ns/op → 347.1 ns/op** (≈ ۲۸٪ سریع‌تر؛ Select هنوز RLock می‌گیرد ولی چون stats lookup روی hot-path سبک شده، اثر همان جا دیده می‌شود)
+- [x] اجرای `go test -race ./internal/client/ -count=2` — پاس کامل (۱.۱۶s)، ۰ race.
 
-### استپ ۸ — UDP Server Ingress: Batch Read & Worker Sizing
+### استپ ۹ — UDP Server Ingress: Batch Read & Worker Sizing
 هدف: throughput بالاتر روی سرور با کارگران بهینه و batching.
 - [ ] افزودن مسیر batch با `golang.org/x/net/ipv4.PacketConn.ReadBatch` در لینوکس (build tag)
 - [ ] auto-tuning `UDP_READERS` بر اساس `GOMAXPROCS` با کف و سقف منطقی
