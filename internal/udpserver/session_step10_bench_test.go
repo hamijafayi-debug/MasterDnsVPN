@@ -24,7 +24,7 @@ func benchPopulateStore(b *testing.B, store *sessionStore, count int) {
 	now := time.Now()
 	for i := 1; i <= count; i++ {
 		id := uint8(i)
-		rec := newTestSessionRecord(id)
+		rec := newTestSessionRecord(b, id)
 		rec.Signature[0] = byte(i)
 		rec.Cookie = byte(i*7 + 1)
 		rec.ResponseMode = 1

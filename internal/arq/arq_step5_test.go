@@ -91,7 +91,7 @@ func TestUpdateAdaptiveRTO_RespectsClamp(t *testing.T) {
 // reaches the configured threshold.
 func TestARQ_FastRetransmit_TriggersAfterThresholdOosAcks(t *testing.T) {
 	enq := NewMockPacketEnqueuer()
-	a := NewARQ(1, 1, enq, nil, 1200, newTestLogger(t), Config{
+	a := newTestARQ(t, 1, 1, enq, nil, 1200, newTestLogger(t), Config{
 		WindowSize:        32,
 		RTO:               5.0,
 		MaxRTO:            10.0,
@@ -152,7 +152,7 @@ func TestARQ_FastRetransmit_TriggersAfterThresholdOosAcks(t *testing.T) {
 // fast-retransmitted twice in a row.
 func TestARQ_FastRetransmit_NoDoubleFire(t *testing.T) {
 	enq := NewMockPacketEnqueuer()
-	a := NewARQ(1, 1, enq, nil, 1200, newTestLogger(t), Config{
+	a := newTestARQ(t, 1, 1, enq, nil, 1200, newTestLogger(t), Config{
 		WindowSize:        32,
 		RTO:               5.0,
 		MaxRTO:            10.0,
@@ -194,7 +194,7 @@ func TestARQ_FastRetransmit_NoDoubleFire(t *testing.T) {
 // TestARQ_FastRetransmit_DisabledByNegativeThreshold verifies the disable knob.
 func TestARQ_FastRetransmit_DisabledByNegativeThreshold(t *testing.T) {
 	enq := NewMockPacketEnqueuer()
-	a := NewARQ(1, 1, enq, nil, 1200, newTestLogger(t), Config{
+	a := newTestARQ(t, 1, 1, enq, nil, 1200, newTestLogger(t), Config{
 		WindowSize:        32,
 		RTO:               5.0,
 		MaxRTO:            10.0,
@@ -233,7 +233,7 @@ func TestARQ_FastRetransmit_DisabledByNegativeThreshold(t *testing.T) {
 // FastRetxThreshold > 0 (typically 3 for RFC 5681 semantics).
 func TestARQ_FastRetransmit_DisabledByDefault(t *testing.T) {
 	enq := NewMockPacketEnqueuer()
-	a := NewARQ(1, 1, enq, nil, 1200, newTestLogger(t), Config{
+	a := newTestARQ(t, 1, 1, enq, nil, 1200, newTestLogger(t), Config{
 		WindowSize: 32,
 		RTO:        1.0,
 		MaxRTO:     5.0,
@@ -246,7 +246,7 @@ func TestARQ_FastRetransmit_DisabledByDefault(t *testing.T) {
 // TestARQ_FastRetransmit_ExplicitRFC5681 verifies the user-facing opt-in works.
 func TestARQ_FastRetransmit_ExplicitRFC5681(t *testing.T) {
 	enq := NewMockPacketEnqueuer()
-	a := NewARQ(1, 1, enq, nil, 1200, newTestLogger(t), Config{
+	a := newTestARQ(t, 1, 1, enq, nil, 1200, newTestLogger(t), Config{
 		WindowSize:        32,
 		RTO:               1.0,
 		MaxRTO:            5.0,
@@ -260,7 +260,7 @@ func TestARQ_FastRetransmit_ExplicitRFC5681(t *testing.T) {
 // TestARQ_RetxBudget_DefaultDerivedFromWindow validates the derivation formula.
 func TestARQ_RetxBudget_DefaultDerivedFromWindow(t *testing.T) {
 	enq := NewMockPacketEnqueuer()
-	a := NewARQ(1, 1, enq, nil, 1200, newTestLogger(t), Config{
+	a := newTestARQ(t, 1, 1, enq, nil, 1200, newTestLogger(t), Config{
 		WindowSize: 600,
 		RTO:        1.0,
 		MaxRTO:     5.0,
@@ -278,7 +278,7 @@ func TestARQ_RetxBudget_DefaultDerivedFromWindow(t *testing.T) {
 	if smallWS < 300 {
 		smallWS = 300
 	}
-	a2 := NewARQ(1, 1, enq, nil, 1200, newTestLogger(t), Config{
+	a2 := newTestARQ(t, 1, 1, enq, nil, 1200, newTestLogger(t), Config{
 		WindowSize: 10,
 		RTO:        1.0,
 		MaxRTO:     5.0,
@@ -295,7 +295,7 @@ func TestARQ_RetxBudget_DefaultDerivedFromWindow(t *testing.T) {
 // expire at once. This mirrors how the budget protects against retx storms.
 func TestARQ_RetxBudget_CapsFastRetransmits(t *testing.T) {
 	enq := NewMockPacketEnqueuer()
-	a := NewARQ(1, 1, enq, nil, 1200, newTestLogger(t), Config{
+	a := newTestARQ(t, 1, 1, enq, nil, 1200, newTestLogger(t), Config{
 		WindowSize:       32,
 		RTO:              0.05, // 50ms — short so checkRetransmits fires
 		MaxRTO:           1.0,
@@ -347,7 +347,7 @@ func TestARQ_RetxBudget_CapsFastRetransmits(t *testing.T) {
 // as dropped.
 func TestARQ_FastRetxBudget_DropsAdditionalCandidates(t *testing.T) {
 	enq := NewMockPacketEnqueuer()
-	a := NewARQ(1, 1, enq, nil, 1200, newTestLogger(t), Config{
+	a := newTestARQ(t, 1, 1, enq, nil, 1200, newTestLogger(t), Config{
 		WindowSize:        32,
 		RTO:               5.0,
 		MaxRTO:            10.0,
@@ -412,7 +412,7 @@ func TestARQ_FastRetxBudget_DropsAdditionalCandidates(t *testing.T) {
 // TestARQ_RetxBudget_WindowSlides verifies the per-second window resets.
 func TestARQ_RetxBudget_WindowSlides(t *testing.T) {
 	enq := NewMockPacketEnqueuer()
-	a := NewARQ(1, 1, enq, nil, 1200, newTestLogger(t), Config{
+	a := newTestARQ(t, 1, 1, enq, nil, 1200, newTestLogger(t), Config{
 		WindowSize:       32,
 		RTO:              1.0,
 		MaxRTO:           5.0,
@@ -438,7 +438,7 @@ func TestARQ_RetxBudget_WindowSlides(t *testing.T) {
 // TestARQ_RetxBudget_UnlimitedWhenNegative confirms unlimited semantics.
 func TestARQ_RetxBudget_UnlimitedWhenNegative(t *testing.T) {
 	enq := NewMockPacketEnqueuer()
-	a := NewARQ(1, 1, enq, nil, 1200, newTestLogger(t), Config{
+	a := newTestARQ(t, 1, 1, enq, nil, 1200, newTestLogger(t), Config{
 		WindowSize:       32,
 		RTO:              1.0,
 		MaxRTO:           5.0,
@@ -461,7 +461,7 @@ func TestARQ_RetxBudget_UnlimitedWhenNegative(t *testing.T) {
 // segments are never fast-retx candidates.
 func TestARQ_FastRetransmit_DoesNotFireOnUndispatchedSegments(t *testing.T) {
 	enq := NewMockPacketEnqueuer()
-	a := NewARQ(1, 1, enq, nil, 1200, newTestLogger(t), Config{
+	a := newTestARQ(t, 1, 1, enq, nil, 1200, newTestLogger(t), Config{
 		WindowSize:        32,
 		RTO:               5.0,
 		MaxRTO:            10.0,
@@ -505,7 +505,7 @@ func TestARQ_FastRetransmit_DoesNotFireOnUndispatchedSegments(t *testing.T) {
 // TestARQ_FastRetransmit_HandlesUint16Wrap exercises wraparound-aware older detection.
 func TestARQ_FastRetransmit_HandlesUint16Wrap(t *testing.T) {
 	enq := NewMockPacketEnqueuer()
-	a := NewARQ(1, 1, enq, nil, 1200, newTestLogger(t), Config{
+	a := newTestARQ(t, 1, 1, enq, nil, 1200, newTestLogger(t), Config{
 		WindowSize:        32,
 		RTO:               5.0,
 		MaxRTO:            10.0,
@@ -560,7 +560,7 @@ func BenchmarkReceiveAck_NoFastRetx(b *testing.B) {
 	}()
 	defer close(done)
 
-	a := NewARQ(1, 1, enq, nil, 1200, nil, Config{
+	a := newTestARQ(b, 1, 1, enq, nil, 1200, nil, Config{
 		WindowSize:        128,
 		RTO:               1.0,
 		MaxRTO:            5.0,
@@ -601,7 +601,7 @@ func BenchmarkReceiveAck_WithOosBumps(b *testing.B) {
 	}()
 	defer close(done)
 
-	a := NewARQ(1, 1, enq, nil, 1200, nil, Config{
+	a := newTestARQ(b, 1, 1, enq, nil, 1200, nil, Config{
 		WindowSize:        256,
 		RTO:               5.0,
 		MaxRTO:            10.0,

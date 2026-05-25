@@ -62,6 +62,7 @@
 - [x] استپ ۱۸ — Cache Layer: dnscache زیرساخت hot/cold و prune بهینه  ✅ 2026-05-25
 - [x] استپ ۱۸.۵ — Fix Cross-Test Flaky Tests (race + late-ACK on closed ARQ)  ✅ 2026-05-25 (اولویت بالا — رفع باگ‌های preexisting قبل از Step 19)
 - [x] استپ ۱۹ — Goroutine Audit & Lifecycle (نشت‌یاب) ✅ 2026-05-25
+- [x] استپ ۱۹.۵ — Fixture Lifecycle Refactor (رفع کامل ARQ-LIFECYCLE-1)  ✅ 2026-05-25 (اولویت بالا — رفع باگ از استپ ۱۹)
 - [ ] استپ ۲۰ — Backpressure & Bounded Queues تمام لایه‌ها
 - [ ] استپ ۲۱ — CI Regression Bench (محافظ سرعت در PR‌ها)
 - [ ] استپ ۲۲ — Race & Fuzz Sweep
@@ -517,6 +518,17 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 
 **اثرات production**: یک متد public جدید روی `Server`/`deferredSessionProcessor`/`socks5UpstreamPool` به نام `WaitForShutdown(timeout)` برای مصرف داخلی و تست. در `Server.Run()` ترتیب shutdown قطعی شد و کد قبلی که پس از cancel فقط `time.Sleep(50ms)` می‌کرد، با waits دقیق جایگزین شد. سرور بدون 2s hard-stop budget هرگز قبل از تأیید close تمام workers برنمی‌گردد — قبل از این تغییر یک corner case وجود داشت که reaper یا pruner پس از Run return هنوز running بمانند. برای ابزار بنچ و graceful shutdown این تضمین کلیدی است.
 
+### استپ ۱۹.۵ — Fixture Lifecycle Refactor (رفع کامل ARQ-LIFECYCLE-1) ✅ (تکمیل‌شده — 2026-05-25)
+هدف: حذف کامل fixture leak باقی‌مانده از Step 19 — حذف workaround `leakDetectorSkipUnderCount` و فعال کردن leak detector به‌صورت پیش‌فرض (بدون نیاز به env override).
+- [x] افزودن helper `newTestARQ(tb testing.TB, ...)` در `internal/arq/arq_test_fixture_step19_5_test.go` — هر ARQ ساخته‌شده در تست خودکار از طریق `tb.Cleanup{Close(Force)+WaitForShutdown(2s)}` join می‌شود. helper برای هر دو `*testing.T` و `*testing.B` (بنچ‌مارک‌ها) قابل استفاده است.
+- [x] migration `NewARQ(` → `newTestARQ(t,` در `internal/arq/arq_test.go` (60 سایت) و `internal/arq/arq_step5_test.go` (15 سایت). برای بنچ‌مارک‌ها (5 سایت) دستی به `b` شیفت شد. تست‌های leak خود detector (`arq_leak_step19_test.go`) که عمداً lifecycle را اعتبارسنجی می‌کنند، `NewARQ` مستقیم نگه داشته شدند.
+- [x] رفع leak در `internal/client/async_runtime_test.go`: تنها سایت `arq.NewARQ(...)` با `t.Cleanup{Close+WaitForShutdown}` پوشش داده شد (instance خود Start نمی‌شود ولی برای یکپارچگی contract پاک‌سازی می‌شود).
+- [x] refactor `newTestSessionRecord(sessionID)` → `newTestSessionRecord(tb testing.TB, sessionID)` در `internal/udpserver/session_cleanup_test.go` + helper جدید `registerSessionRecordCleanup` که در `tb.Cleanup` کل `r.Streams` را walk می‌کند و هر ARQ زنده را Force-close + WaitForShutdown می‌کند. 43 سایت در `session_cleanup_test.go`, `session_cleanup_leak_step19_test.go`, `stream_syn_test.go`, `session_step10_bench_test.go` migrate شدند.
+- [x] حذف runtime stack probing از سه helper `leakDetectorSkipUnderCount` — حالا پیش‌فرض `return false` می‌دهد و env override `LEAK_DETECTOR_SKIP=1` فقط به‌عنوان escape hatch برای محیط‌های loopback flaky حفظ شد. `LEAK_DETECTOR_FORCE_RUN=1` دیگر معنایی ندارد چون رفتار پیش‌فرض همان است.
+- [x] اعتبارسنجی نهایی: `go test -race -count=3 ./...` بدون هیچ env var → **همه ۲۴ پکیج پاس** (arq: 11.7s, client: 31.6s, udpserver: 3.9s). leak detector اکنون به‌طور پیش‌فرض روی هر invocation تست فعال است و هر survivor goroutine یک باگ واقعی محسوب می‌شود — هیچ مسیر فراری وجود ندارد. تنها workaround باقی‌مانده در PLAN.md (🟡 mitigated) به ✅ resolved تبدیل شد.
+
+**اثرات production**: صفر — همه تغییرات منحصراً در `*_test.go` رخ داده. هیچ بایتی از کد production تغییر نکرده. این صرفاً refactor fixture است که از یک API موجود (`WaitForShutdown` که در Step 7 / Step 19 اضافه شد) به‌درستی استفاده می‌کند.
+
 ### استپ ۲۰ — Backpressure & Bounded Queues
 هدف: جلوگیری از انفجار حافظه تحت بار سنگین.
 - [ ] ممیزی همه channel‌های `make(chan ..., N)` و توجیه N
@@ -563,7 +575,7 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 - **[Step 6 / NEW / TEST-only / flaky]** ✅ **resolved در Step 18.5** — `TestBalancerLossThenLatencyRoundRobinsAcrossNearTopCandidates`. ریشه: همان late-ACK race از session cleanup که job scheduler را در full-suite run تحت فشار می‌گذاشت. بعد از رفع باگ ARQ.processReceivedData در 18.5 پایدار شد. ۸×۲۰ count تأیید کامل.
 - **[Step 7 / NEW / TEST-only / cross-test flaky]** ✅ **resolved در Step 18.5** — `TestARQ_GracefulCloseWriteFailureStillRechecksCloseReadCompletion`. ریشه: همان (cross-test GC/scheduler pressure ناشی از goroutineهای ARQ که بعد از Force-close packet push می‌کردند). با guard `closed/rstReceived/rstSent` در processReceivedData رفع شد.
 - **[Step 7 / NEW / TEST-only / cross-test flaky]** ✅ **resolved در Step 18.5** — `TestCleanupClosedSessionClosesStreamsAndClearsQueues`. **ریشه‌یابی واقعی**: در `internal/arq/arq.go` تابع `processReceivedData` (rxLoop async)، حتی پس از `Close(Force)` و `closed=true`، یک `PACKET_STREAM_DATA_ACK` به `enqueuer.PushTXPacket` می‌فرستاد. این ACK پس از `ClearTXQueue()` می‌رسید و TX queue را با size=1 ترک می‌کرد. fix: guard اول تابع که اگر `a.closed || a.rstReceived || a.rstSent` بود، payload را به pool برمی‌گرداند و بدون ACK خروج می‌کند. علاوه بر این `closeAllStreams` در `session.go` قبل از `finalizeAfterARQClose` با `WaitForShutdown(2s)` صبر می‌کند تا rxLoop به‌طور deterministic بسته شود. تأیید: 3×کامل full-suite + 8×20 stress targeted بدون FAIL.
-- **[ARQ-LIFECYCLE-1 / Step 19 / TEST-only / preexisting fixture leak]** 🟡 **mitigated در Step 19** (fix کامل deferred — نیازمند fixture refactor) — چندین تست از پیش موجود در پکیج‌های `internal/arq`، `internal/client` و `internal/udpserver` instance ARQ می‌سازند ولی `Close + WaitForShutdown` نمی‌کنند، چون قبلاً `WaitForShutdown` وجود نداشت. در `go test -count > 1` ، goroutine‌های `retransmitLoop` آنها روی هم تلنبار می‌شوند و leak detector جدید (count-based diff) را در تست‌های leak ما false-positive trigger می‌کند. **mitigation فعلی**: helper `leakDetectorSkipUnderCount()` در هر سه پکیج با sampling `runtime.Stack` اگر retransmitLoop سرگردانی پیدا کرد، تست leak را skip می‌کند. CI با `LEAK_DETECTOR_FORCE_RUN=1` می‌تواند این را غیرفعال کند (برای جلوگیری از regression در production code path). **fix کامل**: نیازمند بازنویسی fixtureهای `buildTCPTestClient`، `createTestSession`، `NewMockPacketEnqueuer` و چندین تست ARQ برای فراخوانی `Close+WaitForShutdown` در `t.Cleanup` — حجیم و orthogonal به Step 19. در Step مستقل آینده پیگیری شود.
+- **[ARQ-LIFECYCLE-1 / Step 19 / TEST-only / preexisting fixture leak]** ✅ **resolved در Step 19.5** — refactor کامل fixture-ها در سه پکیج: `internal/arq` با helper `newTestARQ(tb, ...)` (75 سایت migrate)، `internal/client/async_runtime_test.go` با `t.Cleanup` انفرادی، و `internal/udpserver` با refactor `newTestSessionRecord(tb, ...)` که `registerSessionRecordCleanup` را روی stream map پیوست می‌کند (43 سایت migrate). سه helper `leakDetectorSkipUnderCount` به `return false` پیش‌فرض تبدیل شدند. **تأیید: `go test -race -count=3 ./...` بدون هیچ env override کاملاً پاس می‌شود و leak detector روی هر invocation فعال است.**
 
 ---
 

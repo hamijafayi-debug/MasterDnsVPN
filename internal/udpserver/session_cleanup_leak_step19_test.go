@@ -29,7 +29,7 @@ func TestSessionCleanup_NoGoroutineLeak(t *testing.T) {
 	defer goroutineleak.Check(t)
 
 	s := newTestServerForCleanup()
-	record := newTestSessionRecord(11)
+	record := newTestSessionRecord(t, 11)
 	record.streamCleanup = s.cleanupStreamArtifacts
 
 	cfg := arq.Config{WindowSize: 32, RTO: 1.0, MaxRTO: 5.0}
