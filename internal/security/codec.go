@@ -268,11 +268,21 @@ func (c *Codec) chachaEncrypt(dst, data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("generate chacha20 nonce: %w", err)
 	}
 
+	initialCounter := binary.LittleEndian.Uint32(nonce[:4])
+	// Step 22 — symmetric guard (matches chachaDecrypt). Even though encrypt
+	// derives the initial counter from rand.Read (so it's not attacker-
+	// controlled here), we keep the check to (a) defend against a misbehaving
+	// crypto/rand and (b) signal the constraint explicitly rather than via a
+	// panic deep in the chacha20 library.
+	if !chachaBlocksFit(initialCounter, len(data)) {
+		return nil, ErrInvalidCiphertext
+	}
+
 	stream, err := chacha20.NewUnauthenticatedCipher(c.key, nonce[4:])
 	if err != nil {
 		return nil, err
 	}
-	stream.SetCounter(binary.LittleEndian.Uint32(nonce[:4]))
+	stream.SetCounter(initialCounter)
 	stream.XORKeyStream(dst[chachaNonceSize:], data)
 	return dst, nil
 }
@@ -294,14 +304,42 @@ func (c *Codec) chachaDecrypt(dst, data []byte) ([]byte, error) {
 		dst = dst[:len(ciphertext)]
 	}
 
+	initialCounter := binary.LittleEndian.Uint32(nonce[:4])
+	// Step 22 — CRYPTO-PANIC-1 fix. Reject adversarial inputs that would
+	// overflow ChaCha20's 32-bit block counter inside XORKeyStream (the
+	// generic implementation panics on overflow). On the decrypt path the
+	// remote peer fully controls `initialCounter` (it's the first 4 bytes of
+	// the nonce read from the wire) and `len(ciphertext)`, so without this
+	// guard a single hostile DNS label can crash the server.
+	if !chachaBlocksFit(initialCounter, len(ciphertext)) {
+		return nil, ErrInvalidCiphertext
+	}
+
 	stream, err := chacha20.NewUnauthenticatedCipher(c.key, nonce[4:])
 	if err != nil {
 		return nil, err
 	}
-	stream.SetCounter(binary.LittleEndian.Uint32(nonce[:4]))
+	stream.SetCounter(initialCounter)
 
 	stream.XORKeyStream(dst, ciphertext)
 	return dst, nil
+}
+
+// chachaBlocksFit reports whether processing `n` bytes starting from
+// `initialCounter` will overflow ChaCha20's 32-bit block counter. Used as a
+// guard before SetCounter+XORKeyStream on both encrypt and decrypt paths.
+//
+// The ChaCha20 cipher consumes one counter slot per 64-byte block. A length
+// of n bytes therefore requires ceil(n/64) blocks. The cipher panics if the
+// counter overflows uint32 during the stream (see
+// golang.org/x/crypto/chacha20/chacha_generic.go: "counter overflow").
+func chachaBlocksFit(initialCounter uint32, n int) bool {
+	if n <= 0 {
+		return true
+	}
+	const maxCounter uint64 = 1<<32 - 1
+	blocks := uint64(n+63) / 64
+	return uint64(initialCounter)+blocks <= maxCounter
 }
 
 func (c *Codec) makeAESEncryptor(aead cipher.AEAD) func(dst, src []byte) ([]byte, error) {

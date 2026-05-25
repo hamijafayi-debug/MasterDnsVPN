@@ -66,7 +66,7 @@
 - [x] استپ ۲۰ — Backpressure & Bounded Queues تمام لایه‌ها  ✅ 2026-05-25
 - [x] استپ ۲۱ — CI Regression Bench (محافظ سرعت در PR‌ها)  ✅ 2026-05-25
 - [x] استپ ۲۱.۵ — رفع flaky test `TestDialExternalSOCKS5_PoolHitSkipsGreeting` (اولویت بالا — رفع باگ مشاهده‌شده در استپ ۲۱)  ✅ 2026-05-25
-- [ ] استپ ۲۲ — Race & Fuzz Sweep
+- [x] استپ ۲۲ — Race & Fuzz Sweep  ✅ 2026-05-25 (شامل کشف و رفع CRYPTO-PANIC-1)
 - [ ] استپ ۲۳ — Release Hardening (build flags, PGO, strip, GOAMD64)
 
 ---
@@ -652,13 +652,16 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 
 **📌 درس کلیدی برای آینده**: فیکسچرهای in-process که از atomic counter به‌عنوان signaling استفاده می‌کنند، باید counter را **قبل** از نوشتن byte‌هایی که peer را unblock می‌کند، increment کنند (write-after-bookkeeping)، نه برعکس. در غیر این صورت، تست‌ها به گیت‌های synchronization صریح نیاز دارند (الگوی polling یا channel notify). این الگو می‌تواند در سایر فیکسچرهای پروژه (`fakeUDPListener`, `testARQConn`, etc.) هم مرور شود — اما scope این استپ نبود.
 
-### استپ ۲۲ — Race & Fuzz Sweep
+### استپ ۲۲ — Race & Fuzz Sweep  ✅ 2026-05-25
 هدف: شکار باگ‌های پنهان قبل از prod.
-- [ ] اجرای `go test -race ./...` و رفع warnings (هرکدام جدا گزارش)
-- [ ] افزودن fuzz target برای `vpnproto/parser`, `dnsparser/parser`, `security/codec`
-- [ ] فعال‌سازی fuzz در CI با budget کوتاه (۳۰ ثانیه per target)
-- [ ] رفع crashing input ها
-- [ ] گزارش پوشش fuzz در README
+- [x] اجرای `go test -race ./...` و رفع warnings — کل ۲۵ پکیج با `-race -count=3 ./...` پاس، صفر warning.
+- [x] افزودن fuzz target برای `vpnproto/parser`, `dnsparser/parser`, `security/codec`:
+  - `vpnproto`: ۴ هدف جدید (`FuzzParse`, `FuzzParseAtOffset`, `FuzzForEachPackedControlBlock`, `FuzzDescribePackedControlBlocks`) → `internal/vpnproto/parser_fuzz_test.go`.
+  - `dnsparser`: ۲ هدف موجود (`FuzzParseDNSRequestLite`, `FuzzParseName`) replay شدند، corpus سالم.
+  - `security`: ۳ هدف جدید (`FuzzCodecEncryptDecryptRoundTrip`, `FuzzCodecDecodeStringAndDecrypt`, `FuzzCodecDecodeAndDecrypt`) → `internal/security/codec_fuzz_test.go` + `FuzzCodecDecryptDoesNotPanic` موجود تقویت شد.
+- [x] فعال‌سازی fuzz در CI با budget کوتاه (۳۰ ثانیه per target) — `scripts/fuzzci/fuzz.yml.template` ساخته شد (به دلیل محدودیت scope `workflow` در `genspark_ai_developer`، maintainer یک‌بار به `.github/workflows/` کپی می‌کند).
+- [x] رفع crashing input ها — **CRYPTO-PANIC-1** کشف و رفع شد (پایین در بخش باگ‌ها مستند است). seed کرش `a465a91bc12acc82` به‌صورت دائمی به corpus اضافه شد + ۳ regression test جدید در `codec_chacha_overflow_test.go`.
+- [x] گزارش پوشش fuzz در README — بخش جدید `🔬 Fuzz Coverage & Continuous Fuzzing` به `README.MD` و `README_FA.MD` اضافه شد (شامل جدول targetها، دستورات اجرای محلی، نحوه فعال‌سازی CI).
 
 ### استپ ۲۳ — Release Hardening
 هدف: بیشترین سرعت در باینری نهایی.
@@ -684,6 +687,7 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 - **[Step 7 / NEW / TEST-only / cross-test flaky]** ✅ **resolved در Step 18.5** — `TestCleanupClosedSessionClosesStreamsAndClearsQueues`. **ریشه‌یابی واقعی**: در `internal/arq/arq.go` تابع `processReceivedData` (rxLoop async)، حتی پس از `Close(Force)` و `closed=true`، یک `PACKET_STREAM_DATA_ACK` به `enqueuer.PushTXPacket` می‌فرستاد. این ACK پس از `ClearTXQueue()` می‌رسید و TX queue را با size=1 ترک می‌کرد. fix: guard اول تابع که اگر `a.closed || a.rstReceived || a.rstSent` بود، payload را به pool برمی‌گرداند و بدون ACK خروج می‌کند. علاوه بر این `closeAllStreams` در `session.go` قبل از `finalizeAfterARQClose` با `WaitForShutdown(2s)` صبر می‌کند تا rxLoop به‌طور deterministic بسته شود. تأیید: 3×کامل full-suite + 8×20 stress targeted بدون FAIL.
 - **[ARQ-LIFECYCLE-1 / Step 19 / TEST-only / preexisting fixture leak]** ✅ **resolved در Step 19.5** — refactor کامل fixture-ها در سه پکیج: `internal/arq` با helper `newTestARQ(tb, ...)` (75 سایت migrate)، `internal/client/async_runtime_test.go` با `t.Cleanup` انفرادی، و `internal/udpserver` با refactor `newTestSessionRecord(tb, ...)` که `registerSessionRecordCleanup` را روی stream map پیوست می‌کند (43 سایت migrate). سه helper `leakDetectorSkipUnderCount` به `return false` پیش‌فرض تبدیل شدند. **تأیید: `go test -race -count=3 ./...` بدون هیچ env override کاملاً پاس می‌شود و leak detector روی هر invocation فعال است.**
 - **[Step 21 / TEST-only / flaky / preexisting from Step 17]** ✅ **resolved در Step 21.5** — `TestDialExternalSOCKS5_PoolHitSkipsGreeting` در `internal/udpserver/socks5_pool_step17_test.go`. **ریشه واقعی**: race در fake-proxy bookkeeping — `fakeSOCKS5Proxy.handle()` خط ۱۰۳ `greetingsServed.Add(1)` را **بعد** از نوشتن reply انجام می‌داد، ولی client به‌محض خواندن reply (۲ بایت) برمی‌گشت. تست بین این دو نقطه snapshot می‌گرفت و در پی آن یک Add(1) معوق از primed conn اشتباهاً به‌عنوان greeting جدید شمرده می‌شد. fix: helper `waitProxyCounterAtLeast` (polling 1ms با timeout 2s) که proxy bookkeeping را قبل از capture/assertion sync می‌کند. هم در flaky تست و هم به‌صورت defensive در `TestDialExternalSOCKS5_PoolMissDialsFresh` اعمال شد. تأیید: `-race -count=10` روی هر دو تست، `-race -count=3 ./...` کامل پاس. **فقط test code، production دست‌نخورده.**
+- **[CRYPTO-PANIC-1 / Step 22 / PRODUCTION / remote DoS]** ✅ **resolved در Step 22** — کدک ChaCha20 (`internal/security/codec.go`) روی مسیر decrypt panic می‌کرد وقتی peer از راه دور nonce ای می‌فرستاد که ۴ بایت اولش initial counter را روی `0xFFFFFFFF` ست می‌کرد و ciphertext طولی داشت که بیش از یک block (>64 بایت) باشد. panic از داخل `golang.org/x/crypto/chacha20.(*Cipher).XORKeyStream` می‌آمد ("counter overflow"). چون nonce به‌طور کامل attacker-controlled است (از روی wire خوانده می‌شود)، این یک **DoS از راه دور** بود — یک DNS label مخرب کافی بود سرور را crash کند. **کشف**: توسط `FuzzCodecDecryptDoesNotPanic` در همین استپ. seed کرش‌کننده: `a465a91bc12acc82` (۴×0xFF + 76 بایت '0'). **fix**: helper جدید `chachaBlocksFit(initialCounter, n)` قبل از `SetCounter+XORKeyStream` در هر دو مسیر encrypt/decrypt اضافه شد و در صورت overflow `ErrInvalidCiphertext` برمی‌گرداند. **regression**: seed به corpus دائمی اضافه شد + ۳ تست unit جدید در `codec_chacha_overflow_test.go` (شامل ۱۴ کیس مرزی helper + e2e + replay seed). تأیید: `-race -count=3 ./...` کامل پاس.
 
 ---
 
