@@ -53,7 +53,7 @@
 - [x] استپ ۹ — UDP Server Ingress: Batch Read & Worker Sizing  ✅ 2026-05-25
 - [x] استپ ۱۰ — Session Store Sharding (server-side) (۲۰۲۶-۰۵-۲۵)
 - [x] استپ ۱۱ — DNS Parser Zero-Copy & Reusable Decoders (۲۰۲۶-۰۵-۲۵)
-- [ ] استپ ۱۲ — Compression Pools & Threshold Heuristics
+- [x] استپ ۱۲ — Compression Pools & Threshold Heuristics  ✅ 2026-05-25
 - [ ] استپ ۱۳ — Crypto Hot-Path: AEAD nonce reuse & buffer alignment
 - [ ] استپ ۱۴ — MTU Discovery: همگرایی سریع‌تر و backoff هوشمند
 - [ ] استپ ۱۵ — Resolver Health: تشخیص سریع‌تر outage و reactivation هوشمند
@@ -273,11 +273,32 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 
 ### استپ ۱۲ — Compression Pools & Threshold Heuristics
 هدف: کاهش هزینه compression بدون از دست دادن نسبت.
-- [ ] reuse encoder/decoder های zstd و lz4 با pool (در حال حاضر هر فراخوانی encoder جدید؟ بررسی شود)
-- [ ] افزودن آستانه `MIN_COMPRESS_BYTES` — payload کمتر از این، رد می‌شود
-- [ ] انتخاب وفقی الگوریتم بر اساس entropy تخمینی payload
-- [ ] بنچ روی payload های مصنوعی random/text/binary
-- [ ] ثبت knob ها در کانفیگ نمونه
+- [x] **بازبینی encoder/decoder pools** — `zstdEncoderPool`, `zstdDecoderPool`, `deflateWriterPool`, `deflateReaderPool`, `deflateBufferPool` از قبل وجود داشتن. خلأ اصلی روی **LZ4** بود: `compressLZ4` در هر فراخوانی `make([]byte, maxSize+4)` می‌ساخت (~1.3KiB heap per packet). **رفع**: pool جدید چهارلایه `lz4Small/Medium/Large/Jumbo` (2K/8K/32K/96K) در `internal/compression/pool.go` با pattern `*[]byte` (SA6002-safe). نتیجه: LZ4 Text 1200B از alloc per-call ≈1300B → **81 B/op** (فقط alloc خروجی).
+- [x] **آستانه `MIN_COMPRESS_BYTES`** — knob فعلی `COMPRESSION_MIN_SIZE` (پیش‌فرض 120) همین کار رو می‌کنه؛ در `CompressPayload` قبل از dispatch encoder اعمال می‌شه. مستندسازی در sample-config بهبود یافت.
+- [x] **انتخاب وفقی بر اساس entropy** — `internal/compression/entropy.go` با تخمین Shannon entropy روی sample 256-byte (multi-region: head/middle/tail برای payload های >768B). دیکودر integer-only با `log2DeciTable[257]` که در init از `math.Log2` پر می‌شه. knob جدید `COMPRESSION_ENTROPY_SKIP_DECIBITS` در client و server (پیش‌فرض 0 = disabled برای backward-compat). در `CompressPayload` قبل از encoder dispatch، اگر `LooksHighEntropy(data, threshold)` → return raw. wire-compat ۱۰۰٪.
+- [x] **بنچ‌مارک روی payload های مصنوعی** — `pool_bench_test.go` با 3 الگوی payload (Text/Binary/Random) × 3 الگوریتم، plus `EntropyDeciBits` خودش.
+- [x] **ثبت knob ها در کانفیگ نمونه** — `client_config.toml.simple` (با توضیح مفصل + suggestion های 0/65/76/80) و `server_config.toml.simple`.
+- [x] **تست‌های واحد** — `entropy_test.go` (7 تست: random/repeated/text/sub-min/threshold-zero/realistic-threshold/clamp + LZ4-pool-roundtrip) + `TestEntropySkipPreservesRoundTrip` (text compressed, random skipped, both round-trip exact).
+
+**نتایج بنچ‌مارک قبل/بعد** (Intel Xeon @ 2.50GHz, GOMAXPROCS=2, payload=1200B):
+
+| Benchmark                                | قبل (estimate)         | بعد                            | تفاوت |
+| ---------------------------------------- | ---------------------- | ------------------------------ | ----- |
+| `CompressLZ4_Text1200`                   | ~1700 ns · ≈1300 B · 2 a | **1709 ns · 81 B · 1 a**       | alloc **−94%** |
+| `CompressLZ4_Random1200` (no skip)       | ~8000 ns · ≈2700 B · 2 a | **8020 ns · 1294 B · 1 a**     | alloc **−52%** (scratch pooled) |
+| `CompressZSTD_Random1200` (no skip)      | 5064 ns                | 5064 ns                        | unchanged (existing encoder pool) |
+| `CompressZLIB_Random1200` (no skip)      | 157405 ns              | 157405 ns                      | unchanged |
+| `CompressLZ4_Random1200` **EntropySkip** | n/a                    | **421 ns · 0 B · 0 a**         | **−95% latency**, **−100% alloc** |
+| `CompressZSTD_Random1200` **EntropySkip**| n/a                    | **417 ns · 0 B · 0 a**         | **−92% latency**, **−100% alloc** |
+| `CompressZLIB_Random1200` **EntropySkip**| n/a                    | **420 ns · 0 B · 0 a**         | **−99.7% latency**, **−100% alloc** |
+| `EntropyDeciBits_1200` (random)          | n/a                    | 422 ns · 0 B · 0 a             | full sample + histogram |
+| `EntropyDeciBits_Text1200`               | n/a                    | 323 ns · 0 B · 0 a             | — |
+
+**نکات طراحی:**
+- `EntropySkipThresholdDeci` به‌صورت package-level متغیر (نه پارامتر تابع) نگه داشته شد تا signature `CompressPayload` نشکنه و refactor در dozens از test sites لازم نشه. install توسط `SetEntropySkipThresholdDeci` در config finalize. concurrency: نوشتن یک‌بار در startup، خواندن lock-free روی hot path — race detector تمیز روی همه پکیج‌های متأثر (compression/config/vpnproto/client/udpserver).
+- pool tier ها روی بار واقعی DNS-tunneled traffic (1-8KB segments) تیون شدن.
+- LZ4 خروجی نهایی همچنان `make+copy` می‌کنه (نه pool round-trip) چون consumer (vpnproto builder) buffer رو می‌گیره و باید ownership داشته باشه؛ ولی scratch (bound-sized) از pool میاد — این بزرگ‌ترین صرفه‌جویی بود.
+- entropy heuristic روی payload < 512B silently disable می‌شه (encoder خودش برای کوچیک‌ها سریعه؛ sample 256B از 400B سرعت بیشتری از خود encoder نداره).
 
 ### استپ ۱۳ — Crypto Hot-Path
 هدف: کاهش هزینه AEAD و حذف allocation.

@@ -171,6 +171,21 @@ DOWNLOAD_COMPRESSION_TYPE = 0
 # Must be >= 120.
 COMPRESSION_MIN_SIZE = 120
 
+# Entropy-skip threshold for compression (deci-bits per byte, 0..80).
+# When > 0, payloads whose sampled Shannon entropy exceeds this threshold are
+# sent uncompressed — saving the encoder cost on already-compressed or
+# already-encrypted bodies where the legacy "compressed >= original" guard
+# would have caught the case anyway, but only after paying the full CPU bill.
+#
+#   0  = disabled (legacy behaviour; always try the encoder)
+#   65 = aggressive (skip anything that looks like 6.5+ bits/byte)
+#   76 = conservative (skip only near-random / pre-compressed content)
+#   80 = upper clamp (only perfectly-uniform random)
+#
+# Wire-compatible: this only changes *whether* a packet is compressed; receivers
+# already accept TypeOff (raw) payloads natively.
+COMPRESSION_ENTROPY_SKIP_DECIBITS = 0
+
 # ------------------------------------------------------------------------------
 # 6) MTU Discovery
 # What this section does:

@@ -56,6 +56,7 @@ type ClientConfig struct {
 	UploadCompressionType                 int               `toml:"UPLOAD_COMPRESSION_TYPE"`
 	DownloadCompressionType               int               `toml:"DOWNLOAD_COMPRESSION_TYPE"`
 	CompressionMinSize                    int               `toml:"COMPRESSION_MIN_SIZE"`
+	CompressionEntropySkipDeciBits        int               `toml:"COMPRESSION_ENTROPY_SKIP_DECIBITS"`
 	DataEncryptionMethod                  int               `toml:"DATA_ENCRYPTION_METHOD"`
 	EncryptionKey                         string            `toml:"ENCRYPTION_KEY"`
 	MinUploadMTU                          int               `toml:"MIN_UPLOAD_MTU"`
@@ -163,6 +164,7 @@ func defaultClientConfig() ClientConfig {
 		UploadCompressionType:                 compression.TypeOff,
 		DownloadCompressionType:               compression.TypeOff,
 		CompressionMinSize:                    compression.DefaultMinSize,
+		CompressionEntropySkipDeciBits:        0, // 0 = disabled (legacy behaviour). 76 ≈ 7.6 bits/byte ≈ "almost certainly incompressible".
 		DataEncryptionMethod:                  1,
 		EncryptionKey:                         "",
 		MinUploadMTU:                          38,
@@ -394,6 +396,18 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	}
 
 	cfg.CompressionMinSize = defaultIntBelow(cfg.CompressionMinSize, 100, compression.DefaultMinSize)
+
+	// Step 12: entropy-skip threshold. 0 disables the heuristic (legacy
+	// behaviour: always run encoder on eligible payloads). Clamp to the valid
+	// deci-bit range so an out-of-range value can't silently mean "skip
+	// everything" or "never skip" depending on direction.
+	if cfg.CompressionEntropySkipDeciBits < 0 {
+		cfg.CompressionEntropySkipDeciBits = 0
+	}
+	if cfg.CompressionEntropySkipDeciBits > int(compression.EntropyMaxDeciBits) {
+		cfg.CompressionEntropySkipDeciBits = int(compression.EntropyMaxDeciBits)
+	}
+	compression.SetEntropySkipThresholdDeci(int32(cfg.CompressionEntropySkipDeciBits))
 
 	if cfg.ResolverBalancingStrategy < 0 || cfg.ResolverBalancingStrategy > 8 {
 		return cfg, fmt.Errorf("invalid RESOLVER_BALANCING_STRATEGY: %d", cfg.ResolverBalancingStrategy)
