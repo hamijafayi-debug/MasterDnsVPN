@@ -65,6 +65,94 @@ func newTestSessionRecord(tb testing.TB, sessionID uint8) *sessionRecord {
 	return r
 }
 
+// findOrCreateForTest is the test-only wrapper around sessionStore.findOrCreate
+// that immediately attaches a t.Cleanup hook to the freshly-allocated record,
+// guaranteeing every ARQ goroutine it spawns (including the virtual stream-0
+// retransmitLoop seeded by ensureStream0) is force-closed before the next
+// test starts.
+//
+// Background — ARQ-LIFECYCLE-2 (Step 22.5):
+// `newTestSessionRecord` (added in Step 19.5) fixed the same class of leak
+// for tests that built a sessionRecord by hand, but tests that exercise the
+// real `sessionStore.findOrCreate` code path were missed. Because that
+// path calls `ensureStream0(nil)` internally, *every* call from a test
+// silently spawned a `retransmitLoop` goroutine that survived to pollute
+// later tests' leak-detector snapshots. The result was a ~40% flake rate
+// on TestSOCKS5UpstreamPool_NoGoroutineLeak (and three sibling
+// leak-detector tests) under `go test -race -count=N ./internal/udpserver/`
+// for N >= ~5.
+//
+// All test sites that previously called `store.findOrCreate(...)` should
+// switch to this wrapper. The contract is identical except for the extra
+// `tb` parameter that wires up the cleanup hook.
+func findOrCreateForTest(
+	tb testing.TB,
+	store *sessionStore,
+	payload []byte,
+	uploadCompressionType uint8,
+	downloadCompressionType uint8,
+	maxPacketsPerBatch int,
+	maxClientUploadMTU int,
+	maxClientDownloadMTU int,
+) (*sessionRecord, bool, error) {
+	tb.Helper()
+	record, reused, err := store.findOrCreate(
+		payload,
+		uploadCompressionType,
+		downloadCompressionType,
+		maxPacketsPerBatch,
+		maxClientUploadMTU,
+		maxClientDownloadMTU,
+	)
+	if record != nil {
+		registerSessionRecordCleanup(tb, record)
+	}
+	return record, reused, err
+}
+
+// registerStoreCleanup attaches a t.Cleanup hook that, at test-end, walks
+// every active record in the store and force-closes any ARQ goroutines
+// they spawned. This is the "I don't have a direct handle on the record"
+// companion to registerSessionRecordCleanup — useful when a test exercises
+// a public Server API (e.g. handleSessionInitRequest) that creates a
+// record internally via sessionStore.findOrCreate.
+//
+// See ARQ-LIFECYCLE-2 notes above findOrCreateForTest for background.
+func registerStoreCleanup(tb testing.TB, store *sessionStore) {
+	if tb == nil || store == nil {
+		return
+	}
+	tb.Cleanup(func() {
+		// Snapshot active records (byID is a lock-free atomic.Pointer
+		// array, so we can read without taking store.mu).
+		records := make([]*sessionRecord, 0, len(store.byID))
+		for i := range store.byID {
+			if r := store.byID[i].Load(); r != nil {
+				records = append(records, r)
+			}
+		}
+		for _, r := range records {
+			r.StreamsMu.RLock()
+			streams := make([]*Stream_server, 0, len(r.Streams))
+			for _, s := range r.Streams {
+				streams = append(streams, s)
+			}
+			r.StreamsMu.RUnlock()
+			for _, s := range streams {
+				if s == nil || s.ARQ == nil {
+					continue
+				}
+				if !s.ARQ.IsClosed() {
+					s.ARQ.Close("test store cleanup (Step 22.5)", arq.CloseOptions{Force: true})
+				}
+				if !s.ARQ.WaitForShutdown(2 * time.Second) {
+					tb.Logf("WARNING [Step 22.5 store cleanup]: sessionID=%d streamID=%d ARQ did not shut down within 2s", r.ID, s.ID)
+				}
+			}
+		}
+	})
+}
+
 // registerSessionRecordCleanup walks the record's stream map at test-end
 // and force-closes every ARQ instance, then waits for the worker
 // goroutines to exit. Safe to call on records that are already closed —

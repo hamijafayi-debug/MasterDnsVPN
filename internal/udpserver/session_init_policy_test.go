@@ -21,7 +21,10 @@ func TestSessionInitPolicyMTULimitsAreAppliedToServerSession(t *testing.T) {
 	binary.BigEndian.PutUint16(payload[4:6], 9999)
 	copy(payload[6:10], []byte{1, 2, 3, 4})
 
-	record, reused, err := store.findOrCreate(payload, 0, 0, 10, 150, 2048)
+	// Step 22.5 (ARQ-LIFECYCLE-2): use findOrCreateForTest so the
+	// virtual stream-0 ARQ retransmitLoop spawned via ensureStream0(nil)
+	// is force-closed before the next test runs.
+	record, reused, err := findOrCreateForTest(t, store, payload, 0, 0, 10, 150, 2048)
 	if err != nil {
 		t.Fatalf("findOrCreate returned error: %v", err)
 	}
@@ -44,7 +47,8 @@ func TestSessionStoreHonorsConfiguredActiveSessionLimit(t *testing.T) {
 	payloadA[0] = mtuProbeModeRaw
 	copy(payloadA[6:10], []byte{1, 2, 3, 4})
 
-	record, reused, err := store.findOrCreate(payloadA, 0, 0, 10, 150, 2048)
+	// Step 22.5 (ARQ-LIFECYCLE-2): wire cleanup for the first session.
+	record, reused, err := findOrCreateForTest(t, store, payloadA, 0, 0, 10, 150, 2048)
 	if err != nil {
 		t.Fatalf("first findOrCreate returned error: %v", err)
 	}
@@ -56,7 +60,11 @@ func TestSessionStoreHonorsConfiguredActiveSessionLimit(t *testing.T) {
 	payloadB[0] = mtuProbeModeRaw
 	copy(payloadB[6:10], []byte{5, 6, 7, 8})
 
-	record, reused, err = store.findOrCreate(payloadB, 0, 0, 10, 150, 2048)
+	// The second call is expected to fail (table full); no record
+	// allocated → nothing to clean up. We still route through the
+	// helper for symmetry and to defend against future behaviour
+	// changes that might start allocating before the limit check.
+	record, reused, err = findOrCreateForTest(t, store, payloadB, 0, 0, 10, 150, 2048)
 	if err != ErrSessionTableFull {
 		t.Fatalf("expected ErrSessionTableFull, got record=%v reused=%v err=%v", record != nil, reused, err)
 	}
@@ -83,6 +91,11 @@ func TestHandleSessionInitRequestIncludesServerClientPolicy(t *testing.T) {
 		uploadCompressionMask:   1 << compression.TypeOff,
 		downloadCompressionMask: 1 << compression.TypeOff,
 	}
+	// Step 22.5 (ARQ-LIFECYCLE-2): handleSessionInitRequest internally
+	// calls sessionStore.findOrCreate → ensureStream0(nil), which spawns
+	// an ARQ retransmitLoop goroutine. Wire a store-wide cleanup so the
+	// goroutine is force-closed before the next test starts.
+	registerStoreCleanup(t, s.sessions)
 
 	query, err := DnsParser.BuildTXTQuestionPacket("x.v.example.com", Enums.DNS_RECORD_TYPE_TXT, 4096)
 	if err != nil {
@@ -167,7 +180,12 @@ func TestHandleStreamSynRequestRejectsWhenActiveStreamLimitIsReached(t *testing.
 	payload[0] = mtuProbeModeRaw
 	copy(payload[6:10], []byte{1, 2, 3, 4})
 
-	record, reused, err := store.findOrCreate(payload, 0, 0, 10, 150, 2048)
+	// Step 22.5 (ARQ-LIFECYCLE-2): this was THE test that exposed the
+	// baseline leak — `findOrCreate` → `ensureStream0(nil)` → ARQ.Start
+	// spawned a retransmitLoop goroutine that survived to pollute the
+	// goroutine-leak detector in subsequent tests (~40% flake rate on
+	// the four leak-detector tests under `-count=N`).
+	record, reused, err := findOrCreateForTest(t, store, payload, 0, 0, 10, 150, 2048)
 	if err != nil {
 		t.Fatalf("findOrCreate returned error: %v", err)
 	}
