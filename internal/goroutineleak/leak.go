@@ -42,6 +42,23 @@ import (
 // every test that happens to allocate a fresh receiver.
 var hexAddrPattern = regexp.MustCompile(`0x[0-9a-fA-F]+`)
 
+// createdByPattern matches the "created by ..." line at the bottom of
+// every non-main goroutine's stack trace, with the goroutine-id stripped
+// (e.g. "created by ... in goroutine 123"). The captured text uniquely
+// identifies *where the goroutine was spawned from*, which is invariant
+// across the lifetime of the goroutine — unlike the top-of-stack frame
+// which changes every time the goroutine moves between e.g. select, a
+// mutex Wait, and an inner helper call.
+//
+// Step 22.6 (ARQ-LIFECYCLE-2 follow-up): the previous snapshot key used
+// the entire stack body, so a single retransmitLoop goroutine would
+// migrate between "parked in select at line 1751" and "running
+// checkRetransmits at line 2788" between the before/after samples,
+// causing a false-positive leak whenever a -count=N run happened to
+// sample the goroutine in different states at the two boundaries.
+// Anchoring identity on the "created by" frame eliminates this entirely.
+var createdByPattern = regexp.MustCompile(`(?m)^created by .*$`)
+
 // TestingT is the minimal subset of testing.TB that the leak detector
 // needs. Using a local interface (instead of testing.TB) keeps this
 // package zero-dependency and — more importantly — makes it possible to
@@ -201,13 +218,20 @@ func snapshot() map[string]snapshotEntry {
 		if s == "" {
 			continue
 		}
-		// First line is "goroutine N [state]:" — strip the N so two
-		// runs of the same goroutine collapse to a single key.
-		lines := strings.SplitN(s, "\n", 2)
-		key := s
-		if len(lines) == 2 {
-			key = lines[1]
-		}
+		// Step 22.6 (ARQ-LIFECYCLE-2 follow-up): use the "created by ..."
+		// frame as the identity key when present. This frame is invariant
+		// over a goroutine's lifetime, so a single long-lived goroutine
+		// always collapses to the same key regardless of whether the
+		// runtime sampled it mid-mutex-wait, mid-select, or deep inside
+		// a helper. Without this, a single retransmitLoop instance whose
+		// inner stack changed between the `before` and `after` samples
+		// looked like "one stack disappeared, one new stack appeared" —
+		// a false-positive leak.
+		//
+		// For goroutines without a "created by" frame (the main goroutine
+		// and a handful of runtime workers), we fall back to the full
+		// body so they remain uniquely identified.
+		key := signatureKey(s)
 		// Scrub heap addresses (0x...) so two goroutines running the
 		// same code path on different receiver objects map to the same
 		// identity — important when the test creates fresh structs
@@ -222,6 +246,32 @@ func snapshot() map[string]snapshotEntry {
 		out[key] = entry
 	}
 	return out
+}
+
+// signatureKey returns a stable identity key for a goroutine stack dump.
+// Preference order:
+//  1. "created by ... in goroutine N" frame (stripped of goroutine-id) —
+//     invariant for the goroutine's lifetime, unaffected by where the
+//     scheduler happens to sample it.
+//  2. Stack body without the "goroutine N [state]:" header — fall-back
+//     for goroutines that have no parent (main, runtime workers).
+func signatureKey(stack string) string {
+	// Find the "created by" frame, if any. It's always the LAST such
+	// frame in the stack (each goroutine has at most one creator).
+	if match := createdByPattern.FindString(stack); match != "" {
+		// Strip the "in goroutine N" suffix so the same creator across
+		// different runs collapses to a single key.
+		if idx := strings.Index(match, " in goroutine "); idx != -1 {
+			match = match[:idx]
+		}
+		return match
+	}
+	// Fall-back: strip the dynamic goroutine-id header but keep the rest.
+	lines := strings.SplitN(stack, "\n", 2)
+	if len(lines) == 2 {
+		return lines[1]
+	}
+	return stack
 }
 
 // diff reports goroutines whose count in `after` is strictly greater
