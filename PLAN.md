@@ -65,7 +65,7 @@
 - [x] استپ ۱۹.۵ — Fixture Lifecycle Refactor (رفع کامل ARQ-LIFECYCLE-1)  ✅ 2026-05-25 (اولویت بالا — رفع باگ از استپ ۱۹)
 - [x] استپ ۲۰ — Backpressure & Bounded Queues تمام لایه‌ها  ✅ 2026-05-25
 - [x] استپ ۲۱ — CI Regression Bench (محافظ سرعت در PR‌ها)  ✅ 2026-05-25
-- [ ] استپ ۲۱.۵ — رفع flaky test `TestDialExternalSOCKS5_PoolHitSkipsGreeting` (اولویت بالا — رفع باگ مشاهده‌شده در استپ ۲۱)
+- [x] استپ ۲۱.۵ — رفع flaky test `TestDialExternalSOCKS5_PoolHitSkipsGreeting` (اولویت بالا — رفع باگ مشاهده‌شده در استپ ۲۱)  ✅ 2026-05-25
 - [ ] استپ ۲۲ — Race & Fuzz Sweep
 - [ ] استپ ۲۳ — Release Hardening (build flags, PGO, strip, GOAMD64)
 
@@ -615,14 +615,42 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 
 **اثرات production**: صفر. این صرفاً ابزار CI است که از regression جلوگیری می‌کند و روی wire protocol یا runtime client/server هیچ اثری ندارد. roll-back با حذف workflow file.
 
-### استپ ۲۱.۵ — رفع flaky test `TestDialExternalSOCKS5_PoolHitSkipsGreeting` (اولویت بالا)
+### استپ ۲۱.۵ — رفع flaky test `TestDialExternalSOCKS5_PoolHitSkipsGreeting` ✅ (تکمیل‌شده — 2026-05-25)
 هدف: بازیابی پاس قطعی `go test -race -count=3 ./...` بدون env override، بدون تغییر کد production.
-- [ ] reproduce تحت بار scheduler (`-race -count=1 ./...` در یک ران ترکیبی، یا فقط `-race -p 4 ./internal/client/... ./internal/udpserver/...`)
-- [ ] تحلیل دقیق pool-hit detection: کدام goroutine می‌بایست stable greetings counter را check کند، چه intervalی برای polling مناسب است
-- [ ] افزایش مدت polling/wait در تست (بدون تغییر کد production) یا تبدیل polling به sync notify
-- [ ] افزودن assert deterministic از طریق `t.Cleanup` که post-condition را تأیید کند
-- [ ] اعتبارسنجی `-race -count=3 ./...` در tree تمیز
-- [ ] ثبت در bug ledger با وضعیت ✅
+
+**🔬 ریشه‌یابی دقیق**:
+تست در `internal/udpserver/socks5_pool_step17_test.go` یک flake واقعی timing race بود، نه بار scheduler. مسئله این است:
+
+- `fakeSOCKS5Proxy.handle()` در خط ۱۰۳ `greetingsServed.Add(1)` را **بعد** از نوشتن greeting reply انجام می‌دهد.
+- `Server.performExternalSOCKS5Greeting()` در client به‌محض خواندن ۲ بایت reply برمی‌گردد — یعنی **قبل** از اینکه proxy به خط ۱۰۳ برسد.
+- بنابراین در خط ۳۶۳ تست:
+  ```go
+  greetingsBefore := proxy.greetingsServed.Load()
+  ```
+  می‌تواند مقدار `0` را capture کند درحالی‌که proxy هنوز روی خط ۱۰۰-۱۰۲ در حال نوشتن یا پیش از atomic.Add است.
+- پس از این، call بعدی `dialExternalSOCKS5TargetContext` (pool hit، بدون greeting جدید) به‌اشتباه آغاز می‌شود. در همین زمان، proxy goroutine سرانجام به `Add(1)` برای primed conn می‌رسد و counter از 0 به 1 می‌رود. تست assertion `got != greetingsBefore` (1 != 0) را fail می‌کند، گویا یک greeting "جدید" اتفاق افتاده، که نیفتاده.
+
+این یک bug بنیادی در write-then-bookkeeping pattern در fake proxy است که فقط در یک تست خاص surface شد ولی به‌طور بالقوه در `TestDialExternalSOCKS5_PoolMissDialsFresh` هم همان anti-pattern وجود دارد (counter check بدون sync). همان pattern روی `connectsServed` هم وجود دارد (خط ۱۴۵، بعد از writing CONNECT reply).
+
+**🛠️ راه‌حل اعمال‌شده** (test-only، صفر تغییر production):
+- helper جدید `waitProxyCounterAtLeast(tb, name, *atomic.Int64, want)` با polling 1ms و timeout 2s wall-clock اضافه شد. این gate صبر می‌کند تا proxy bookkeeping خود را تمام کند، سپس تست پیش می‌رود.
+- در `TestDialExternalSOCKS5_PoolHitSkipsGreeting`:
+  - قبل از capture `greetingsBefore` → `waitProxyCounterAtLeast(t, "greetingsServed", &proxy.greetingsServed, 1)`
+  - قبل از assertion پایانی → `waitProxyCounterAtLeast(t, "connectsServed", &proxy.connectsServed, connectsBefore+1)`
+- در `TestDialExternalSOCKS5_PoolMissDialsFresh` (defensive):
+  - قبل از هر دو assertion → gate برای greetingsServed=1 و connectsServed=1
+
+**✅ اعتبارسنجی**:
+- ✅ `go build ./...` (موفق)
+- ✅ `go vet ./internal/udpserver/...` (clean)
+- ✅ `go test -race -count=10 -run "TestDialExternalSOCKS5_PoolHitSkipsGreeting|TestDialExternalSOCKS5_PoolMissDialsFresh" ./internal/udpserver/` (10/10 پاس)
+- ✅ `go test -race -count=3 ./internal/udpserver/` (3/3 پاس)
+- ✅ **`go test -race -count=1 ./...`** (تمام ۲۵ پکیج پاس — همان فرمان قبلاً flake می‌داد)
+- ✅ **`go test -race -count=3 ./...`** (تمام ۲۵ پکیج پاس — client: 31.9s، arq: 11.8s، udpserver: 3.9s)
+
+**اثرات production**: **صفر**. تنها فایل modified: `internal/udpserver/socks5_pool_step17_test.go`. helper جدید فقط در test context قابل دسترس است (testing.TB). proxy fixture و کد production دست‌نخورده‌اند.
+
+**📌 درس کلیدی برای آینده**: فیکسچرهای in-process که از atomic counter به‌عنوان signaling استفاده می‌کنند، باید counter را **قبل** از نوشتن byte‌هایی که peer را unblock می‌کند، increment کنند (write-after-bookkeeping)، نه برعکس. در غیر این صورت، تست‌ها به گیت‌های synchronization صریح نیاز دارند (الگوی polling یا channel notify). این الگو می‌تواند در سایر فیکسچرهای پروژه (`fakeUDPListener`, `testARQConn`, etc.) هم مرور شود — اما scope این استپ نبود.
 
 ### استپ ۲۲ — Race & Fuzz Sweep
 هدف: شکار باگ‌های پنهان قبل از prod.
@@ -655,7 +683,7 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 - **[Step 7 / NEW / TEST-only / cross-test flaky]** ✅ **resolved در Step 18.5** — `TestARQ_GracefulCloseWriteFailureStillRechecksCloseReadCompletion`. ریشه: همان (cross-test GC/scheduler pressure ناشی از goroutineهای ARQ که بعد از Force-close packet push می‌کردند). با guard `closed/rstReceived/rstSent` در processReceivedData رفع شد.
 - **[Step 7 / NEW / TEST-only / cross-test flaky]** ✅ **resolved در Step 18.5** — `TestCleanupClosedSessionClosesStreamsAndClearsQueues`. **ریشه‌یابی واقعی**: در `internal/arq/arq.go` تابع `processReceivedData` (rxLoop async)، حتی پس از `Close(Force)` و `closed=true`، یک `PACKET_STREAM_DATA_ACK` به `enqueuer.PushTXPacket` می‌فرستاد. این ACK پس از `ClearTXQueue()` می‌رسید و TX queue را با size=1 ترک می‌کرد. fix: guard اول تابع که اگر `a.closed || a.rstReceived || a.rstSent` بود، payload را به pool برمی‌گرداند و بدون ACK خروج می‌کند. علاوه بر این `closeAllStreams` در `session.go` قبل از `finalizeAfterARQClose` با `WaitForShutdown(2s)` صبر می‌کند تا rxLoop به‌طور deterministic بسته شود. تأیید: 3×کامل full-suite + 8×20 stress targeted بدون FAIL.
 - **[ARQ-LIFECYCLE-1 / Step 19 / TEST-only / preexisting fixture leak]** ✅ **resolved در Step 19.5** — refactor کامل fixture-ها در سه پکیج: `internal/arq` با helper `newTestARQ(tb, ...)` (75 سایت migrate)، `internal/client/async_runtime_test.go` با `t.Cleanup` انفرادی، و `internal/udpserver` با refactor `newTestSessionRecord(tb, ...)` که `registerSessionRecordCleanup` را روی stream map پیوست می‌کند (43 سایت migrate). سه helper `leakDetectorSkipUnderCount` به `return false` پیش‌فرض تبدیل شدند. **تأیید: `go test -race -count=3 ./...` بدون هیچ env override کاملاً پاس می‌شود و leak detector روی هر invocation فعال است.**
-- **[Step 21 / TEST-only / flaky / preexisting from Step 17]** 🔍 **مشاهده‌شده، نیاز به رفع جداگانه** — `TestDialExternalSOCKS5_PoolHitSkipsGreeting` در `internal/udpserver/socks5_pool_step17_test.go` در یک ران count=1 (پس از تست‌های سنگین `internal/client` در همان فرآیند) فیل کرد با پیام `expected greetings stable at 0, got 1`. تأیید flaky بودن: ران مستقل با `-count=5` پاس، ران مستقل پکیج با `-count=3` پاس. ریشه احتمالی: pool-hit detection به polling کوتاه متکی است و در محیطی که goroutine scheduler تحت فشار است (race detector + سایر تست‌های parallel) timing race ایجاد می‌کند. **scope این استپ نبود** (Step 21 فقط `scripts/benchregress` و `.github/workflows/bench.yml` را اضافه می‌کند، هیچ کد production تغییر نکرده است). به‌عنوان bug ثبت و در یک استپ جداگانه باید رفع شود (مشابه الگوی Step 6 و Step 18.5 برای flaky‌های preexisting).
+- **[Step 21 / TEST-only / flaky / preexisting from Step 17]** ✅ **resolved در Step 21.5** — `TestDialExternalSOCKS5_PoolHitSkipsGreeting` در `internal/udpserver/socks5_pool_step17_test.go`. **ریشه واقعی**: race در fake-proxy bookkeeping — `fakeSOCKS5Proxy.handle()` خط ۱۰۳ `greetingsServed.Add(1)` را **بعد** از نوشتن reply انجام می‌داد، ولی client به‌محض خواندن reply (۲ بایت) برمی‌گشت. تست بین این دو نقطه snapshot می‌گرفت و در پی آن یک Add(1) معوق از primed conn اشتباهاً به‌عنوان greeting جدید شمرده می‌شد. fix: helper `waitProxyCounterAtLeast` (polling 1ms با timeout 2s) که proxy bookkeeping را قبل از capture/assertion sync می‌کند. هم در flaky تست و هم به‌صورت defensive در `TestDialExternalSOCKS5_PoolMissDialsFresh` اعمال شد. تأیید: `-race -count=10` روی هر دو تست، `-race -count=3 ./...` کامل پاس. **فقط test code، production دست‌نخورده.**
 
 ---
 

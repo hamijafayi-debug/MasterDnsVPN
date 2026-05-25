@@ -27,6 +27,47 @@ import (
 	"time"
 )
 
+// waitProxyCounterAtLeast spins until a proxy atomic counter reaches `want`.
+//
+// Why this exists (bug ledger Step 21 — fix for flaky
+// TestDialExternalSOCKS5_PoolHitSkipsGreeting and a defensive guard for the
+// sibling end-to-end CONNECT tests):
+//
+// The proxy goroutine performs the bookkeeping *after* it has finished
+// writing the wire reply that unblocks the client's ReadFull. Concretely:
+//
+//	handle() flow            : ... write(greetingReply) → greetingsServed.Add(1)
+//	                                                       ^ test reads here is racy
+//	                           ... write(connectReply)  → connectsServed.Add(1)
+//	                                                       ^ test reads here is racy
+//
+// On the client side, performExternalSOCKS5Greeting and
+// dialExternalSOCKS5TargetContext return as soon as they have *read* the
+// proxy reply, which can be **before** the proxy reaches its atomic.Add.
+// Under a contended scheduler (race detector, `-p` parallel packages,
+// sibling client-package tests in the same process), this window is wide
+// enough to be observed deterministically (the original flake surfaced on a
+// full `go test -race ./...` run).
+//
+// Synchronization fix: tests that depend on a specific counter value MUST
+// pass through this gate to wait for the proxy to finish its bookkeeping.
+//
+// Bounded retry: a 2s wall-clock cap is far above any plausible goroutine-
+// scheduling delay on CI (localhost write+atomic.Add is sub-ms in practice).
+// On timeout we fail fast so a real bug in the proxy is surfaced, not masked.
+func waitProxyCounterAtLeast(tb testing.TB, name string, counter *atomic.Int64, want int64) {
+	tb.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if counter.Load() >= want {
+			return
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+	tb.Fatalf("timed out waiting for %s >= %d (got %d)",
+		name, want, counter.Load())
+}
+
 // ----------------------------------------------------------------------------
 // In-process fake SOCKS5 proxy
 // ----------------------------------------------------------------------------
@@ -337,6 +378,12 @@ func TestDialExternalSOCKS5_PoolMissDialsFresh(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	_ = conn.Close()
+	// Defensive sync: same proxy-bookkeeping-after-write race as the pool-hit
+	// test (see waitProxyCounterAtLeast doc). Cap to exactly the expected
+	// count via Load() afterwards to detect over-counting (which would
+	// indicate a real bug in the pool's miss path).
+	waitProxyCounterAtLeast(t, "greetingsServed", &proxy.greetingsServed, 1)
+	waitProxyCounterAtLeast(t, "connectsServed", &proxy.connectsServed, 1)
 	if proxy.greetingsServed.Load() != 1 {
 		t.Fatalf("expected 1 greeting (cold dial), got %d", proxy.greetingsServed.Load())
 	}
@@ -360,6 +407,15 @@ func TestDialExternalSOCKS5_PoolHitSkipsGreeting(t *testing.T) {
 	if !s.socks5UpstreamPool.Put(primed) {
 		t.Fatalf("Put primed rejected")
 	}
+	// Sync gate (fixes flaky timing race — bug ledger Step 21):
+	// The proxy goroutine increments greetingsServed AFTER it writes the
+	// greeting reply (handle() line ~103), but performExternalSOCKS5Greeting
+	// returns AS SOON AS it reads the 2-byte reply. Without this gate,
+	// greetingsBefore can race-capture 0 while the proxy is still in-flight
+	// toward its Add(1), and a deferred increment later in the test would
+	// then look like a "new" greeting and fail the assertion.
+	// Wait until the priming greeting is fully accounted for.
+	waitProxyCounterAtLeast(t, "greetingsServed", &proxy.greetingsServed, 1)
 	greetingsBefore := proxy.greetingsServed.Load()
 	connectsBefore := proxy.connectsServed.Load()
 
@@ -370,7 +426,16 @@ func TestDialExternalSOCKS5_PoolHitSkipsGreeting(t *testing.T) {
 	}
 	_ = conn.Close()
 
+	// Sync gate: wait for proxy to record the CONNECT (it Adds after writing
+	// the reply). Once this returns, the proxy's handle() has either advanced
+	// past line 145 or never will — making the assertions deterministic.
+	waitProxyCounterAtLeast(t, "connectsServed", &proxy.connectsServed, connectsBefore+1)
+
 	// Greeting count must NOT have advanced (we reused the primed conn).
+	// After waiting for the CONNECT counter, the greeting counter is also
+	// settled because the proxy increments greetingsServed before reading
+	// CONNECT (i.e. there is no path that can grow greetings after CONNECT
+	// is recorded for a given connection).
 	if got := proxy.greetingsServed.Load(); got != greetingsBefore {
 		t.Fatalf("expected greetings stable at %d, got %d (pool hit must skip greeting)",
 			greetingsBefore, got)
