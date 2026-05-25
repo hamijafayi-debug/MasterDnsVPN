@@ -1021,11 +1021,15 @@ func NewClientConfigFlagBinder(fs *flag.FlagSet) (*ClientConfigFlagBinder, error
 }
 
 func (b *ClientConfigFlagBinder) Overrides() ClientConfigOverrides {
+	// Defensive: if the caller passes a nil binder (e.g. a test that
+	// hasn't constructed one yet), return an empty overrides struct
+	// rather than dereferencing nil. The nil check MUST come before the
+	// `len(b.setFields)` access below, which itself dereferences b.
+	if b == nil {
+		return ClientConfigOverrides{Values: map[string]any{}}
+	}
 	overrides := ClientConfigOverrides{
 		Values: make(map[string]any, len(b.setFields)),
-	}
-	if b == nil {
-		return overrides
 	}
 
 	valueElem := reflect.ValueOf(&b.values).Elem()

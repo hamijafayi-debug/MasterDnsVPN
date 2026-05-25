@@ -284,11 +284,7 @@ func (s *Server) preprocessInboundPacket(vpnPacket VpnProto.Packet) bool {
 		_ = s.queueImmediateControlAck(record, vpnPacket)
 	}
 
-	if s.consumeInboundStreamAck(vpnPacket, existingStream) {
-		return true
-	}
-
-	return false
+	return s.consumeInboundStreamAck(vpnPacket, existingStream)
 }
 
 func (s *Server) handlePackedControlBlocksRequest(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {

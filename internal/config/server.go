@@ -954,11 +954,13 @@ func NewServerConfigFlagBinder(fs *flag.FlagSet) (*ServerConfigFlagBinder, error
 }
 
 func (b *ServerConfigFlagBinder) Overrides() ServerConfigOverrides {
+	// Defensive: see the matching note in ClientConfigFlagBinder.Overrides.
+	// The nil check must come BEFORE len(b.setFields) which derefs b.
+	if b == nil {
+		return ServerConfigOverrides{Values: map[string]any{}}
+	}
 	overrides := ServerConfigOverrides{
 		Values: make(map[string]any, len(b.setFields)),
-	}
-	if b == nil {
-		return overrides
 	}
 
 	valueElem := reflect.ValueOf(&b.values).Elem()

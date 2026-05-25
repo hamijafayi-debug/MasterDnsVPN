@@ -686,11 +686,20 @@ func (c *Client) recheckResolverDownloadMTU(ctx context.Context, conn Connection
 }
 
 func (c *Client) resolverHealthProbeTimeout() time.Duration {
+	// Defensive: the nil-receiver check must come first — the previous
+	// version dereferenced c.mtuTestTimeout BEFORE checking c == nil, so
+	// a nil receiver would have crashed before reaching the defensive
+	// branch. In practice this method is only called via *Client method
+	// chains that already validate non-nil, but keeping the check
+	// consistent with intent prevents subtle future regressions.
+	if c == nil {
+		return 4 * time.Second
+	}
 	timeout := c.mtuTestTimeout
 	if timeout <= 0 {
 		timeout = 4 * time.Second
 	}
-	if c == nil || c.balancer == nil {
+	if c.balancer == nil {
 		return timeout
 	}
 

@@ -553,3 +553,26 @@ func TestLoadClientConfigFromJSONBase64WithOverridesAppliesBeforeFinalize(t *tes
 		t.Fatalf("expected override resolvers to be loaded, got=%d", cfg.ResolverMap["9.9.9.9"])
 	}
 }
+
+// TestClientConfigFlagBinderOverridesOnNilReceiver locks in the fix for the
+// SA5011 nil-deref bug discovered during the comprehensive review after
+// Step 23: previously `Overrides()` dereferenced `b.setFields` BEFORE the
+// `if b == nil` check, so a nil receiver would panic instead of returning
+// the documented zero-state overrides struct. After the fix, calling
+// `Overrides()` on a nil binder returns a valid, empty ClientConfigOverrides
+// without crashing — preserving the defensive intent of the original code.
+func TestClientConfigFlagBinderOverridesOnNilReceiver(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Overrides() panicked on nil receiver: %v", r)
+		}
+	}()
+	var b *ClientConfigFlagBinder
+	got := b.Overrides()
+	if got.Values == nil {
+		t.Fatal("Overrides().Values must be non-nil even for nil binder")
+	}
+	if len(got.Values) != 0 {
+		t.Fatalf("Overrides().Values must be empty for nil binder, got %d entries", len(got.Values))
+	}
+}
