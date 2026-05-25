@@ -131,6 +131,24 @@ var (
 	// are declared here up-front so wiring in later steps is mechanical.
 	CacheHits   = &Counter{}
 	CacheMisses = &Counter{}
+
+	// AdaptiveDupSuppressed counts data-plane packets whose duplication
+	// count was dropped to 1 by the Step 16 adaptive duplication policy
+	// because the recently-observed loss across active resolvers was
+	// below the configured threshold. Each increment represents one
+	// outbound packet that would otherwise have been duplicated. A
+	// healthy value tracks the live data rate while the path stays
+	// clean; it should fall to zero whenever loss climbs above the
+	// threshold.
+	AdaptiveDupSuppressed = &Counter{}
+
+	// AdaptiveDupApplied counts data-plane packets where the adaptive
+	// duplication policy was enabled AND the path met the loss threshold,
+	// so the full configured duplication count was kept. Together with
+	// AdaptiveDupSuppressed this gives the operator a ratio of "how
+	// often the policy is actually saving traffic vs. how often loss is
+	// high enough to need redundancy".
+	AdaptiveDupApplied = &Counter{}
 )
 
 func init() {
@@ -145,6 +163,8 @@ func init() {
 	register("masterdnsvpn_sessions_active", SessionsActive)
 	register("masterdnsvpn_cache_hits", CacheHits)
 	register("masterdnsvpn_cache_misses", CacheMisses)
+	register("masterdnsvpn_adaptive_dup_suppressed", AdaptiveDupSuppressed)
+	register("masterdnsvpn_adaptive_dup_applied", AdaptiveDupApplied)
 }
 
 // Snapshot captures every well-known counter at a single point in time. It is
@@ -172,5 +192,7 @@ func Collect() []Snapshot {
 		{"sessions_active", SessionsActive.Value()},
 		{"cache_hits", CacheHits.Value()},
 		{"cache_misses", CacheMisses.Value()},
+		{"adaptive_dup_suppressed", AdaptiveDupSuppressed.Value()},
+		{"adaptive_dup_applied", AdaptiveDupApplied.Value()},
 	}
 }

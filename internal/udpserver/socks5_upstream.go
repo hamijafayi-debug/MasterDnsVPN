@@ -184,7 +184,33 @@ func (s *Server) dialExternalSOCKS5Target(targetPayload []byte) (net.Conn, error
 	return s.dialExternalSOCKS5TargetContext(context.Background(), targetPayload)
 }
 
-func (s *Server) dialExternalSOCKS5TargetContext(ctx context.Context, targetPayload []byte) (net.Conn, error) {
+// acquireExternalSOCKS5Conn returns a TCP connection ready to receive a
+// SOCKS5 CONNECT request. When the upstream pool is enabled AND has a
+// primed entry, the returned connection skipped the TCP handshake +
+// greeting + auth round-trips; fromPool=true signals the caller that
+// the conn is already past the greeting state. Otherwise the function
+// dials a fresh TCP connection and returns fromPool=false so the caller
+// runs the full handshake.
+func (s *Server) acquireExternalSOCKS5Conn(ctx context.Context) (net.Conn, bool, error) {
+	if s != nil && s.socks5UpstreamPool != nil && s.socks5UpstreamPool.Enabled() {
+		if conn, ok := s.socks5UpstreamPool.Get(); ok {
+			return conn, true, nil
+		}
+	}
+	conn, err := s.dialTCPTargetContext(ctx, s.externalSOCKS5Address)
+	if err != nil {
+		return nil, false, err
+	}
+	return conn, false, nil
+}
+
+// retryExternalSOCKS5AfterStale is invoked exactly once when a pooled
+// connection failed to send/receive the CONNECT message — almost always
+// because the upstream proxy quietly closed an idle TCP socket. The
+// retry bypasses the pool entirely (force-fresh path) and performs the
+// full handshake, so a single stale entry can never cascade into a
+// stream-open failure.
+func (s *Server) retryExternalSOCKS5AfterStale(ctx context.Context, targetPayload []byte) (net.Conn, error) {
 	conn, err := s.dialTCPTargetContext(ctx, s.externalSOCKS5Address)
 	if err != nil {
 		return nil, err
@@ -205,27 +231,97 @@ func (s *Server) dialExternalSOCKS5TargetContext(ctx context.Context, targetPayl
 		_ = conn.SetDeadline(time.Now().Add(timeout))
 	}
 
-	if err := writeAll(conn, s.externalSOCKS5Greeting()); err != nil {
+	if err := s.performExternalSOCKS5Greeting(conn); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if timeout > 0 {
+		_ = conn.SetDeadline(time.Now().Add(timeout))
+	}
+
+	request := make([]byte, 3+len(targetPayload))
+	request[0] = 0x05
+	request[1] = 0x01
+	request[2] = 0x00
+	copy(request[3:], targetPayload)
+	if err := writeAll(conn, request); err != nil {
 		_ = conn.Close()
 		return nil, &upstreamSOCKS5Error{packetType: Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE, err: err}
 	}
 
-	var greeting [2]byte
-
-	if _, err := io.ReadFull(conn, greeting[:]); err != nil {
+	var header [4]byte
+	if _, err := io.ReadFull(conn, header[:]); err != nil {
 		_ = conn.Close()
 		return nil, &upstreamSOCKS5Error{packetType: Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE, err: err}
 	}
-	if greeting[0] != 0x05 {
+	if header[0] != 0x05 {
 		_ = conn.Close()
 		return nil, &upstreamSOCKS5Error{
 			packetType: Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE,
-			err:        errors.New("upstream proxy is not a valid SOCKS5 server"),
+			err:        errors.New("invalid external SOCKS5 connect response"),
 		}
 	}
-	if err := s.handleExternalSOCKS5Auth(conn, greeting[1]); err != nil {
+	if header[1] != 0x00 {
 		_ = conn.Close()
+		return nil, &upstreamSOCKS5Error{
+			packetType: socks5ReplyPacketType(header[1]),
+			err:        fmt.Errorf("external SOCKS5 failed to connect to target: code %d", header[1]),
+		}
+	}
+	if err := discardSOCKS5BoundAddress(conn, header[3]); err != nil {
+		_ = conn.Close()
+		return nil, &upstreamSOCKS5Error{packetType: Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE, err: err}
+	}
+	if !stopCancelWatch() {
+		_ = conn.Close()
+		if ctx != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, &upstreamSOCKS5Error{
+			packetType: Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE,
+			err:        errors.New("external SOCKS5 handshake cancelled"),
+		}
+	}
+	_ = conn.SetDeadline(time.Time{})
+	return conn, nil
+}
+
+func (s *Server) dialExternalSOCKS5TargetContext(ctx context.Context, targetPayload []byte) (net.Conn, error) {
+	// Step 17 — try the upstream pool first. A pool hit skips both the
+	// TCP handshake to the proxy AND the greeting+auth round-trips: the
+	// caller pays only for the CONNECT request + reply below. On miss,
+	// fall back to the original full-handshake path.
+	conn, fromPool, err := s.acquireExternalSOCKS5Conn(ctx)
+	if err != nil {
 		return nil, err
+	}
+
+	stopCancelWatch := func() bool { return true }
+	if ctx != nil {
+		stopCancelWatch = context.AfterFunc(ctx, func() {
+			_ = conn.Close()
+		})
+	}
+
+	timeout := s.socksConnectTimeout
+	if timeout <= 0 {
+		timeout = s.cfg.SOCKSConnectTimeout()
+	}
+	if timeout > 0 {
+		_ = conn.SetDeadline(time.Now().Add(timeout))
+	}
+
+	if !fromPool {
+		// Fresh connection — perform greeting + auth before CONNECT.
+		// performExternalSOCKS5Greeting clears the deadline on success,
+		// so re-install the connect-timeout deadline afterward.
+		if err := s.performExternalSOCKS5Greeting(conn); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		if timeout > 0 {
+			_ = conn.SetDeadline(time.Now().Add(timeout))
+		}
 	}
 
 	request := make([]byte, 3+len(targetPayload))
@@ -236,6 +332,14 @@ func (s *Server) dialExternalSOCKS5TargetContext(ctx context.Context, targetPayl
 
 	if err := writeAll(conn, request); err != nil {
 		_ = conn.Close()
+		// Step 17 — a pooled connection may have been silently closed
+		// by the upstream proxy while it was idle. On write failure
+		// against a pooled conn, retry exactly once with a fresh,
+		// handshake-completed connection so a single stale entry
+		// doesn't surface as a stream-open failure.
+		if fromPool {
+			return s.retryExternalSOCKS5AfterStale(ctx, targetPayload)
+		}
 		return nil, &upstreamSOCKS5Error{packetType: Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE, err: err}
 	}
 
@@ -243,10 +347,16 @@ func (s *Server) dialExternalSOCKS5TargetContext(ctx context.Context, targetPayl
 
 	if _, err := io.ReadFull(conn, header[:]); err != nil {
 		_ = conn.Close()
+		if fromPool {
+			return s.retryExternalSOCKS5AfterStale(ctx, targetPayload)
+		}
 		return nil, &upstreamSOCKS5Error{packetType: Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE, err: err}
 	}
 	if header[0] != 0x05 {
 		_ = conn.Close()
+		if fromPool {
+			return s.retryExternalSOCKS5AfterStale(ctx, targetPayload)
+		}
 		return nil, &upstreamSOCKS5Error{
 			packetType: Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE,
 			err:        errors.New("invalid external SOCKS5 connect response"),
