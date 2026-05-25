@@ -1147,6 +1147,68 @@ The historical baseline is stored on an orphan branch named `bench-baseline` (au
 
 ---
 
+## 🔬 Fuzz Coverage & Continuous Fuzzing
+
+Alongside the regression-bench guard, the repository carries a **fuzz-test layer** that exercises parsing and crypto code paths with randomized inputs on every commit.
+
+### Why fuzz at all?
+
+Hand-written unit tests cover the *expected* shape of inputs. Fuzzing covers everything else — malformed packets, truncated headers, hostile counters, oversized buffers — exactly the inputs an attacker on the public internet can send.
+
+During Step 22 of the project plan a brief fuzz sweep (<60 seconds total) found a **real production DoS bug** in the ChaCha20 codec (`CRYPTO-PANIC-1`): a remote peer setting the 32-bit ChaCha20 initial counter to `0xFFFFFFFF` could trigger an unrecoverable panic inside `golang.org/x/crypto/chacha20.(*Cipher).XORKeyStream`. The crashing seed (`a465a91bc12acc82`) is now committed under `internal/security/testdata/fuzz/...` and replayed on every CI run, so the same bug can never silently reappear.
+
+### Fuzz targets (current)
+
+| Package | Target | What it stresses |
+|---|---|---|
+| `internal/vpnproto` | `FuzzParse` | Full packet `Parse(data)` invariants: header length bounds, extension-flag decode, integrity-byte check. |
+| `internal/vpnproto` | `FuzzParseAtOffset` | Offset-variant entry point — guards against off-by-one on bounded buffers. |
+| `internal/vpnproto` | `FuzzForEachPackedControlBlock` | Bounded iteration over packed control blocks; guards against OOB advance on misaligned payloads. |
+| `internal/vpnproto` | `FuzzDescribePackedControlBlocks` | Debug-render path; must never panic on attacker-controlled bytes. |
+| `internal/dnsparser` | `FuzzParseDNSRequestLite` | Lite DNS request parser — name extraction & label-jump validation. |
+| `internal/dnsparser` | `FuzzParseName` | DNS name decompression — historically a CVE-rich area. |
+| `internal/security` | `FuzzCodecDecryptDoesNotPanic` | Cross-method (AES/ChaCha/XOR) decrypt path — the target that found `CRYPTO-PANIC-1`. |
+| `internal/security` | `FuzzCodecEncryptDecryptRoundTrip` | Property test: `Decrypt(Encrypt(x)) == x` for all 6 codec methods. |
+| `internal/security` | `FuzzCodecDecodeStringAndDecrypt` | The on-wire transport-codec entry point — base64 + codec composite. |
+| `internal/security` | `FuzzCodecDecodeAndDecrypt` | Same path on raw bytes (no base64) — exercises the binary boundary and pooled-buffer reuse. |
+
+Each target seeds its own corpus; new crashes auto-save to `internal/<pkg>/testdata/fuzz/<TargetName>/<sha>` and become permanent regression tests for free.
+
+### Running fuzz locally
+
+```bash
+# Replay all saved corpus (fast, deterministic — runs as part of `go test`)
+go test -race -count=1 ./internal/vpnproto/... ./internal/dnsparser/... ./internal/security/...
+
+# Stress a single target for 30 seconds (writes new crashes if any)
+go test -run='^$' -fuzz='^FuzzCodecDecryptDoesNotPanic$' -fuzztime=30s ./internal/security/
+
+# List every fuzz target in a package
+go test -list '^Fuzz' ./internal/vpnproto/...
+```
+
+### Continuous fuzzing in CI
+
+Like the bench workflow, the fuzz workflow ships as a template that the maintainer copies once into `.github/workflows/` (one-time `workflow`-scope action):
+
+```bash
+mkdir -p .github/workflows
+cp scripts/fuzzci/fuzz.yml.template .github/workflows/fuzz.yml
+git add .github/workflows/fuzz.yml && git commit -m "ci: enable fuzz workflow"
+git push
+```
+
+Once activated, the workflow:
+
+- Replays the full saved corpus on every push and PR (catches any code change that re-introduces a known crash like CRYPTO-PANIC-1).
+- Runs each `Fuzz*` target for **30 seconds** on every push/PR and nightly at 03:17 UTC.
+- Uploads any new crashing inputs as build artifacts (`fuzz-crashes-<target>`, 30-day retention).
+- Cost: ~5 minutes of GitHub-hosted runner time per CI invocation.
+
+The 30-second budget is intentionally short — for deep continuous fuzzing the recommendation remains OSS-Fuzz. This in-repo gate exists as a tripwire: it guarantees that known crashes stay fixed and that new fuzz corpora grow naturally as the codebase evolves.
+
+---
+
 ## 🤝 Contributing
 
 We welcome all contributions. If you have an idea, bug report, or performance improvement, please open an Issue or Pull Request.

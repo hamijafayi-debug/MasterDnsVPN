@@ -1,0 +1,118 @@
+# ==============================================================================
+# MasterDnsVPN — Continuous Fuzzing Workflow (Template)
+# Step 22 — `Race & Fuzz Sweep`.
+#
+# WHY THIS IS A TEMPLATE FILE
+# ---------------------------
+# Cloning `genspark_ai_developer` does not include `workflow` scope, so the
+# CI cannot author or update files under `.github/workflows/` itself. This
+# template is shipped under `scripts/fuzzci/` instead. To activate fuzz CI:
+#
+#     mkdir -p .github/workflows
+#     cp scripts/fuzzci/fuzz.yml.template .github/workflows/fuzz.yml
+#     git add .github/workflows/fuzz.yml
+#     git commit -m "ci: enable continuous fuzz workflow"
+#     git push
+#
+# After that, every push and PR replays the saved corpus, and 30-second fuzz
+# rounds run against every `Fuzz*` target. Any new crashing input is uploaded
+# as a build artifact (and auto-committed under
+# `internal/<pkg>/testdata/fuzz/<TargetName>/<sha>` if the maintainer chooses
+# to land it as a permanent regression seed).
+#
+# Schedule rationale: a 30-second budget per target is intentionally short.
+# This workflow is a *tripwire*, not a deep search. It guarantees:
+#   - known crashing inputs (e.g. CRYPTO-PANIC-1) stay fixed forever
+#   - newly-introduced parsers cannot regress silently
+#   - any future fuzz corpus growth is shared across CI runs
+# For continuous deep fuzzing, the recommendation remains OSS-Fuzz.
+# ==============================================================================
+
+name: fuzz
+
+on:
+  push:
+    branches: [main, genspark_ai_developer]
+  pull_request:
+  schedule:
+    # Nightly at 03:17 UTC. Spread away from the top of the hour to dodge
+    # GitHub-Actions runner contention.
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.pkg }} / ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # --- vpnproto -----------------------------------------------------
+          - pkg: ./internal/vpnproto
+            target: FuzzParse
+          - pkg: ./internal/vpnproto
+            target: FuzzParseAtOffset
+          - pkg: ./internal/vpnproto
+            target: FuzzForEachPackedControlBlock
+          - pkg: ./internal/vpnproto
+            target: FuzzDescribePackedControlBlocks
+          # --- dnsparser ----------------------------------------------------
+          - pkg: ./internal/dnsparser
+            target: FuzzParseDNSRequestLite
+          - pkg: ./internal/dnsparser
+            target: FuzzParseName
+          # --- security/codec ----------------------------------------------
+          - pkg: ./internal/security
+            target: FuzzCodecDecryptDoesNotPanic
+          - pkg: ./internal/security
+            target: FuzzCodecEncryptDecryptRoundTrip
+          - pkg: ./internal/security
+            target: FuzzCodecDecodeStringAndDecrypt
+          - pkg: ./internal/security
+            target: FuzzCodecDecodeAndDecrypt
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # 1. Replay the saved corpus first. This is what guarantees no known
+      #    crashing input (e.g. CRYPTO-PANIC-1 seed `a465a91bc12acc82`) can
+      #    silently reappear. The replay runs as part of `go test`.
+      - name: Corpus replay (regression seeds)
+        run: |
+          go test -race -count=1 -run "^${{ matrix.target }}$" ${{ matrix.pkg }}
+
+      # 2. Short, time-boxed fuzz round. 30 seconds is a tripwire window.
+      - name: Fuzz ${{ matrix.target }} (30s budget)
+        run: |
+          go test \
+            -run='^$' \
+            -fuzz='^${{ matrix.target }}$' \
+            -fuzztime=30s \
+            ${{ matrix.pkg }}
+
+      # 3. If the fuzzer found a new crash, the new seed will be sitting
+      #    under `${{ matrix.pkg }}/testdata/fuzz/${{ matrix.target }}/`.
+      #    Upload everything in that directory so maintainers can download
+      #    and triage. `if-no-files-found: ignore` keeps clean runs green.
+      - name: Upload new crash seeds (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes-${{ matrix.target }}
+          path: ${{ matrix.pkg }}/testdata/fuzz/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30
