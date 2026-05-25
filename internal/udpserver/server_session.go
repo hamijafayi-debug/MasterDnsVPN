@@ -217,6 +217,8 @@ func (s *Server) streamARQConfig(compressionType uint8) arq.Config {
 		TerminalDrainTimeout:        s.cfg.ARQTerminalDrainTimeoutSec,
 		TerminalAckWaitTimeout:      s.cfg.ARQTerminalAckWaitTimeoutSec,
 		CompressionType:             compressionType,
+		FastRetxThreshold:           s.cfg.ARQFastRetxThreshold,
+		RetxBudgetPerSec:            s.cfg.ARQRetxBudgetPerSecond,
 	}
 }
 

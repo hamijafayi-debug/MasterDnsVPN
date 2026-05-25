@@ -78,6 +78,17 @@ type arqDataItem struct {
 	SampleEligible  bool
 	CompressionType uint8
 	TTL             time.Duration
+	// OosAckCount tracks how many ACKs for *higher* sequence numbers have
+	// arrived while this packet remained un-acked. Once it reaches the
+	// fast-retransmit threshold (analogous to TCP's 3-dup-ACK rule, RFC
+	// 5681), the segment is retransmitted immediately without waiting for
+	// the RTO timer. Reset after a fast retransmit so the same packet is
+	// not retransmitted on every subsequent ACK.
+	OosAckCount uint8
+	// FastRetransmitted is set after the segment has been fast-retransmitted
+	// once. It guards against the same packet being fast-retransmitted again
+	// before any new ACK information arrives.
+	FastRetransmitted bool
 }
 
 type arqControlItem struct {
@@ -210,6 +221,27 @@ type ARQ struct {
 	dataNackInitialDelay     time.Duration
 	dataNackRepeatInterval   time.Duration
 
+	// Step 5: fast-retransmit and retx budget. Both are local-only — they
+	// do not appear in any wire packet.
+	fastRetxThreshold uint8 // 0 = disabled; otherwise # of OOS-ACKs before fast retx
+	// retx budget — token-bucket-like accounting using a 1-second sliding
+	// window. retxWindowStart marks the start of the current second;
+	// retxWindowCount is the number of retx (RTO + fast) emitted within it.
+	// retxBudgetPerSec is the cap (≤0 means unlimited). All four fields are
+	// protected by a.mu.
+	retxBudgetPerSec int
+	retxWindowStart  time.Time
+	retxWindowCount  int
+	// sndLoBoundSN caches the lowest sequence number currently in sndBuf.
+	// sndLoBoundValid says whether the cached value is up-to-date (a delete
+	// of the minimum invalidates the cache; a fresh recompute revalidates
+	// it). This lets the fast-retransmit walk in ReceiveAck short-circuit
+	// in the common in-order case where every ACK targets the minimum SN
+	// and there is no older pending entry to bump. Both fields are
+	// protected by a.mu.
+	sndLoBoundSN    uint16
+	sndLoBoundValid bool
+
 	// Virtual streams do not emit local close side effects.
 	isVirtual bool
 
@@ -300,6 +332,22 @@ type Config struct {
 	CompressionType             uint8
 	IsClient                    bool
 	InboundQueueSize            int
+	// FastRetxThreshold is the number of out-of-order ACKs (ACKs for
+	// sequence numbers > the oldest un-acked segment) that must accumulate
+	// before fast-retransmit kicks in for that older segment. 0 (default)
+	// = use the canonical RFC 5681 value of 3. Negative values disable
+	// fast-retransmit entirely (RTO timer is the only retx trigger). This
+	// knob is *local-only* and never crosses the wire, preserving the
+	// existing wire protocol.
+	FastRetxThreshold int
+	// RetxBudgetPerSec caps the total number of data retransmissions
+	// (RTO-triggered *or* fast-triggered) this ARQ instance will emit per
+	// second. 0 (default) = use a sensible value derived from window size.
+	// Negative = unlimited. The cap prevents pathological retx storms when
+	// the path is genuinely lossy without disabling retx altogether — the
+	// dropped retransmissions are recorded in metrics.ArqRetxBudgetDropped.
+	// Local-only knob; not on the wire.
+	RetxBudgetPerSec int
 }
 
 type CloseOptions struct {
@@ -412,6 +460,41 @@ func NewARQ(streamID uint16, sessionID uint8, enqueuer PacketEnqueuer, localConn
 	a.dataAdaptiveRTO = adaptiveRTOState{currentBase: a.rto}
 	a.controlAdaptiveRTO = adaptiveRTOState{currentBase: a.controlRto}
 	a.IsClient = cfg.IsClient
+
+	// Step 5 — fast-retransmit threshold.
+	//   0  → DISABLED (default). Keeps the ACK fast-path at Step-4 cost: no
+	//        OOS-ACK bookkeeping, no extra sndBuf walks. Users who care about
+	//        lossy paths can opt-in by setting this to 3 (RFC 5681 dup-ACK rule).
+	//   <0 → disabled (explicit; same internal state as 0).
+	//   >0 → user value, clamped to [1, 255] so it fits in a uint8.
+	switch {
+	case cfg.FastRetxThreshold <= 0:
+		a.fastRetxThreshold = 0
+	case cfg.FastRetxThreshold > 255:
+		a.fastRetxThreshold = 255
+	default:
+		a.fastRetxThreshold = uint8(cfg.FastRetxThreshold)
+	}
+
+	// Step 5 — retx budget per second.
+	//   0  → derive from window: 4 × windowSize, floor 256, ceiling 65535.
+	//   <0 → unlimited (stored as -1 sentinel internally).
+	//   >0 → user value.
+	switch {
+	case cfg.RetxBudgetPerSec == 0:
+		derived := 4 * windowSize
+		if derived < 256 {
+			derived = 256
+		}
+		if derived > 65535 {
+			derived = 65535
+		}
+		a.retxBudgetPerSec = derived
+	case cfg.RetxBudgetPerSec < 0:
+		a.retxBudgetPerSec = -1
+	default:
+		a.retxBudgetPerSec = cfg.RetxBudgetPerSec
+	}
 
 	a.ctx, a.cancel = context.WithCancel(context.Background())
 	return a
@@ -532,6 +615,23 @@ func clampDuration(v, minV, maxV time.Duration) time.Duration {
 	return v
 }
 
+// rttvarFloor prevents the smoothed RTT variance from collapsing to zero on
+// extremely stable paths (e.g. loopback). Without a floor, the RFC 6298
+// formula RTO = SRTT + K*RTTVAR converges to ≈ SRTT, which is the precise
+// boundary where a tiny scheduling jitter (or one momentarily slow ACK) makes
+// the timer fire spuriously and triggers a retransmission storm. 1ms is the
+// industry-standard granularity used by Linux/BSD TCP stacks.
+const rttvarFloor = time.Millisecond
+
+// updateAdaptiveRTO refines the smoothed RTT estimator (RFC 6298) using a
+// fresh RTT sample. The estimator tracks SRTT (smoothed RTT) and RTTVAR
+// (smoothed RTT variance) with α=1/8 and β=1/4, and derives the next base RTO
+// as SRTT + 4·RTTVAR clamped into [minRTO, maxRTO].
+//
+// Step 5 hardening: RTTVAR is clamped to ≥ rttvarFloor (1ms) so paths with
+// near-constant RTT (loopback, lan, low-jitter tunnels) cannot drive the base
+// RTO down to exactly SRTT — that boundary is where spurious retransmissions
+// originate.
 func updateAdaptiveRTO(state adaptiveRTOState, sample, minRTO, maxRTO time.Duration) adaptiveRTOState {
 	sample = clampDuration(sample, minRTO, maxRTO)
 
@@ -543,6 +643,10 @@ func updateAdaptiveRTO(state adaptiveRTOState, sample, minRTO, maxRTO time.Durat
 		delta := absDuration(state.srtt - sample)
 		state.rttvar = time.Duration((3*state.rttvar + delta) / 4)
 		state.srtt = time.Duration((7*state.srtt + sample) / 8)
+	}
+
+	if state.rttvar < rttvarFloor {
+		state.rttvar = rttvarFloor
 	}
 
 	state.currentBase = clampDuration(state.srtt+4*state.rttvar, minRTO, maxRTO)
@@ -652,6 +756,7 @@ func (a *ARQ) releaseRcvBufLocked() {
 // Caller must hold a.mu.
 func (a *ARQ) clearAllQueues(clearControl bool) {
 	a.sndBuf = make(map[uint16]*arqDataItem)
+	a.invalidateSndLoBoundLocked()
 	a.releaseRcvBufLocked()
 	a.rcvBuf = make(map[uint16][]byte)
 	if clearControl {
@@ -683,6 +788,7 @@ func (a *ARQ) clearOutboundStateLocked(clearControl bool) {
 	}
 
 	a.sndBuf = make(map[uint16]*arqDataItem)
+	a.invalidateSndLoBoundLocked()
 	if clearControl {
 		a.controlSndBuf = make(map[uint32]*arqControlItem)
 	}
@@ -736,6 +842,144 @@ func (a *ARQ) noteSuccessfulDataSample(sample time.Duration) {
 	a.mu.Lock()
 	a.dataAdaptiveRTO = updateAdaptiveRTO(a.dataAdaptiveRTO, sample, a.rto, a.maxRTO)
 	a.mu.Unlock()
+}
+
+// trackInsertedSndSNLocked maintains the cached lowest-pending-SN hint
+// when a new segment is inserted into sndBuf. The hint is a strict lower
+// bound: a fresh insert may shrink it (if the new sn is older modulo 2^16
+// than the current cached value), but never grow it. Caller must hold a.mu.
+func (a *ARQ) trackInsertedSndSNLocked(sn uint16) {
+	if !a.sndLoBoundValid {
+		a.sndLoBoundSN = sn
+		a.sndLoBoundValid = true
+		return
+	}
+	// sn is "older" than the cached value when (cached - sn) ∈ (0, 32768).
+	diff := uint16(a.sndLoBoundSN - sn)
+	if diff > 0 && diff < 32768 {
+		a.sndLoBoundSN = sn
+	}
+}
+
+// trackDeletedSndSNLocked maintains the cached lowest-pending-SN hint when
+// a segment is removed from sndBuf. Removing any sn other than the current
+// minimum leaves the hint valid (still a lower bound). Removing the
+// minimum either advances the hint to the next contiguous sn (the
+// dominant in-order-ACK case, O(1)) or invalidates the cache when there
+// is a gap (forcing the next reader to recompute). Caller must hold a.mu.
+func (a *ARQ) trackDeletedSndSNLocked(sn uint16) {
+	if !a.sndLoBoundValid || a.sndLoBoundSN != sn {
+		return
+	}
+	if len(a.sndBuf) == 0 {
+		a.sndLoBoundValid = false
+		a.sndLoBoundSN = 0
+		return
+	}
+	// Fast-path: under in-order ACK arrival, the next minimum is exactly
+	// sn+1. A single map probe avoids the full O(N) re-scan and keeps the
+	// hint perfectly accurate. On a gap (out-of-order ACK), we degrade to
+	// invalidating the cache; the next ReceiveAck that sees an OOS path
+	// will recompute via the walk anyway.
+	next := sn + 1
+	if _, ok := a.sndBuf[next]; ok {
+		a.sndLoBoundSN = next
+		return
+	}
+	a.sndLoBoundValid = false
+	a.sndLoBoundSN = 0
+}
+
+// invalidateSndLoBoundLocked is the explicit reset used by bulk wipes
+// (clearAllQueues, clearOutboundStateLocked). Caller must hold a.mu.
+func (a *ARQ) invalidateSndLoBoundLocked() {
+	a.sndLoBoundValid = false
+	a.sndLoBoundSN = 0
+}
+
+// consumeRetxBudgetLocked is the gating function for every data
+// retransmission emitted by this ARQ. It implements a coarse 1-second
+// sliding window: the first retx in a new second resets the counter, and
+// subsequent retx within the same second are admitted only while the count
+// stays below the configured cap.
+//
+// Returns true when the caller may proceed with the retransmission, false
+// when the budget is exhausted (in which case the caller should record
+// metrics.ArqRetxBudgetDropped and skip the retx). Caller must hold a.mu.
+//
+// Budget = -1 means unlimited; budget = 0 should never reach here because
+// NewARQ promotes it to a derived positive value.
+func (a *ARQ) consumeRetxBudgetLocked(now time.Time) bool {
+	if a.retxBudgetPerSec < 0 {
+		return true
+	}
+	if a.retxBudgetPerSec == 0 {
+		// Defensive — never expected because NewARQ rewrites zero.
+		return true
+	}
+	if a.retxWindowStart.IsZero() || now.Sub(a.retxWindowStart) >= time.Second {
+		a.retxWindowStart = now
+		a.retxWindowCount = 0
+	}
+	if a.retxWindowCount >= a.retxBudgetPerSec {
+		return false
+	}
+	a.retxWindowCount++
+	return true
+}
+
+// emitFastRetransmits sends one PACKET_STREAM_RESEND for each candidate
+// produced by the per-ACK fast-retransmit detection in ReceiveAck, respecting
+// the per-second retransmission budget. Called with a.mu *unlocked* —
+// re-acquires the lock for each per-item bookkeeping update.
+func (a *ARQ) emitFastRetransmits(jobs []rtxJob, now time.Time) {
+	if len(jobs) == 0 {
+		return
+	}
+	for _, j := range jobs {
+		a.mu.Lock()
+		allowed := a.consumeRetxBudgetLocked(now)
+		a.mu.Unlock()
+		if !allowed {
+			metrics.ArqRetxBudgetDropped.Add(1)
+			continue
+		}
+
+		ok := a.enqueuer.PushTXPacket(
+			Enums.DefaultPacketPriority(Enums.PACKET_STREAM_RESEND),
+			Enums.PACKET_STREAM_RESEND,
+			j.sn, 0, 0, j.compressionType, 0, j.data,
+		)
+		if !ok {
+			// Roll back the budget consumption so the next attempt is
+			// not unfairly throttled.
+			a.mu.Lock()
+			if a.retxBudgetPerSec > 0 && a.retxWindowCount > 0 {
+				a.retxWindowCount--
+			}
+			a.mu.Unlock()
+			a.noteDrainQueueFailure(now)
+			continue
+		}
+
+		metrics.ArqRetx.Add(1)
+		metrics.ArqFastRetx.Add(1)
+
+		a.mu.Lock()
+		if info, exists := a.sndBuf[j.sn]; exists {
+			info.LastSentAt = now
+			info.Dispatched = false
+			info.Retries++
+			info.SampleEligible = false
+			info.OosAckCount = 0
+			info.FastRetransmitted = true
+			// Grow CurrentRTO like the RTO-driven path so the timer
+			// does not fire on the heels of a fast retx.
+			grownRTO := time.Duration(float64(info.CurrentRTO) * dataRetransmitRTOGrowthFactor)
+			info.CurrentRTO = clampDuration(grownRTO, a.currentDataBaseRTO(), a.maxRTO)
+		}
+		a.mu.Unlock()
+	}
 }
 
 func (a *ARQ) noteSuccessfulControlSample(sample time.Duration) {
@@ -845,6 +1089,7 @@ func (a *ARQ) MarkCloseWriteReceived() {
 		}
 	}
 	a.sndBuf = make(map[uint16]*arqDataItem)
+	a.invalidateSndLoBoundLocked()
 	a.signalWindowNotFull()
 	a.mu.Unlock()
 
@@ -1194,6 +1439,7 @@ func (a *ARQ) ioLoop() {
 				CompressionType: a.compressionType,
 				TTL:             0,
 			}
+			a.trackInsertedSndSNLocked(sn)
 			a.mu.Unlock()
 
 			ok := a.enqueuer.PushTXPacket(
@@ -1898,6 +2144,14 @@ func (a *ARQ) isGracefulCloseInProgress() bool {
 
 // ReceiveAck resolves inbound STREAM_DATA_ACK and frees SEND_WINDOW backpressure buffer slots.
 // It returns true only when this ARQ instance was actually tracking the data packet.
+//
+// Step 5 — fast-retransmit hook: every ACK that arrives also increments the
+// OosAckCount of every *older* still-pending segment in sndBuf. The closest
+// MasterDnsVPN analogue to TCP's duplicate-ACK is "ACK for a higher SN while
+// an older SN is still un-acked". Once that count reaches a.fastRetxThreshold
+// for a given older segment, we retransmit it immediately without waiting
+// for the RTO timer. The fast-retransmit candidates are collected under the
+// lock and emitted afterwards to keep the critical section short.
 func (a *ARQ) ReceiveAck(packetType uint8, sn uint16) bool {
 	a.mu.Lock()
 	now := time.Now()
@@ -1906,13 +2160,74 @@ func (a *ARQ) ReceiveAck(packetType uint8, sn uint16) bool {
 	shouldSignalWindow := false
 	var sample time.Duration
 	sampleEligible := false
+	var fastRetxJobs []rtxJob
 
+	// Pre-snapshot the lowest pending SN behind the just-acked one. The
+	// fast-retransmit heuristic only cares about segments that are "older
+	// than the acked SN" — and the most likely loss candidate is the very
+	// front of the window. Bumping only the single oldest still-pending
+	// segment keeps the per-ACK cost bounded and matches TCP's behaviour
+	// where 3 dup-ACKs flag the segment at snd.una for fast retransmit.
 	if info, exists := a.sndBuf[sn]; exists {
 		if info.SampleEligible && info.Dispatched && !info.LastSentAt.IsZero() {
 			sample = now.Sub(info.LastSentAt)
 			sampleEligible = true
 		}
+		// Remember whether the just-acked sn was at (or before) the
+		// cached lower-bound BEFORE the delete. If it was, then by
+		// definition no older pending segment exists in sndBuf and we
+		// can skip the whole fast-retransmit walk — the dominant case
+		// for in-order ACK flows. seqBehind tolerates uint16 wrap.
+		hintValid := a.sndLoBoundValid
+		hintSN := a.sndLoBoundSN
+		noOlderPending := hintValid && (sn == hintSN || seqBehind(hintSN, sn))
+
 		delete(a.sndBuf, sn)
+		a.trackDeletedSndSNLocked(sn)
+
+		// Bump OOS-ACK on the single oldest still-pending dispatched
+		// segment whose sn is strictly older than the just-acked sn.
+		// Skipped entirely when the lower-bound hint proves no older
+		// segment can exist — which is the typical case under in-order
+		// ACK arrival.
+		if a.fastRetxThreshold > 0 && !noOlderPending && len(a.sndBuf) > 0 {
+			var oldestInfo *arqDataItem
+			var oldestSN uint16
+			var oldestDist uint16
+			for candSN, candInfo := range a.sndBuf {
+				if candInfo == nil || !candInfo.Dispatched {
+					continue
+				}
+				diff := uint16(sn - candSN)
+				if diff == 0 || diff >= 32768 {
+					continue // candSN is not strictly older than sn
+				}
+				if oldestInfo == nil || diff > oldestDist {
+					oldestInfo = candInfo
+					oldestSN = candSN
+					oldestDist = diff
+				}
+			}
+			if oldestInfo != nil {
+				if oldestInfo.OosAckCount < 255 {
+					oldestInfo.OosAckCount++
+				}
+				if !oldestInfo.FastRetransmitted && oldestInfo.OosAckCount >= a.fastRetxThreshold {
+					fastRetxJobs = []rtxJob{{
+						sn:              oldestSN,
+						data:            oldestInfo.Data,
+						compressionType: oldestInfo.CompressionType,
+					}}
+				}
+				// Re-validate the lower-bound hint with the freshly
+				// computed minimum so the next ACK in this burst can
+				// take the fast-path. Without this, every ACK that
+				// follows a gap would re-walk the entire sndBuf.
+				a.sndLoBoundSN = oldestSN
+				a.sndLoBoundValid = true
+			}
+		}
+
 		if a.deferredClose || a.state == StateDraining {
 			a.noteDrainProgressLocked(now)
 		}
@@ -1933,6 +2248,13 @@ func (a *ARQ) ReceiveAck(packetType uint8, sn uint16) bool {
 		}
 		if remover, ok := a.enqueuer.(queuedDataRemover); ok {
 			remover.RemoveQueuedData(sn)
+		}
+
+		// Fire fast-retransmits *after* releasing the lock and after the
+		// adaptive RTO sample update. This ordering matches the existing
+		// checkRetransmits convention (no enqueuer call under the lock).
+		if len(fastRetxJobs) > 0 {
+			a.emitFastRetransmits(fastRetxJobs, now)
 		}
 
 		if a.closeReadReceivedLocked() {
@@ -1984,6 +2306,13 @@ func (a *ARQ) HandleDataNack(sn uint16) bool {
 	a.mu.Lock()
 	if info, exists := a.sndBuf[sn]; exists {
 		info.SampleEligible = false
+		// NACK-driven retransmission is functionally identical to a
+		// fast retransmit: the segment is back on the wire because the
+		// receiver explicitly asked for it. Reset the OOS-ACK counter
+		// so subsequent ACK arrivals can not immediately re-trigger a
+		// fast retx for the same packet.
+		info.OosAckCount = 0
+		info.FastRetransmitted = true
 	}
 	a.mu.Unlock()
 	return true
@@ -2466,6 +2795,18 @@ func (a *ARQ) checkRetransmits() {
 
 	priorityKinds := a.retransmitPriorityKinds(jobs)
 	for i, j := range jobs {
+		// Step 5 — gate every RTO-driven retransmission through the
+		// per-second budget. The budget counter is shared with the
+		// fast-retransmit path so a single ARQ instance cannot exceed
+		// the configured retx-per-second rate via either mechanism.
+		a.mu.Lock()
+		allowed := a.consumeRetxBudgetLocked(now)
+		a.mu.Unlock()
+		if !allowed {
+			metrics.ArqRetxBudgetDropped.Add(1)
+			continue
+		}
+
 		priority := Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA)
 		packetType := uint8(Enums.PACKET_STREAM_DATA)
 
@@ -2480,6 +2821,13 @@ func (a *ARQ) checkRetransmits() {
 			j.sn, 0, 0, j.compressionType, 0, j.data,
 		)
 		if !ok {
+			// Refund the budget — the enqueue refusal is a queue-full
+			// signal, not a path-loss signal.
+			a.mu.Lock()
+			if a.retxBudgetPerSec > 0 && a.retxWindowCount > 0 {
+				a.retxWindowCount--
+			}
+			a.mu.Unlock()
 			a.noteDrainQueueFailure(now)
 			continue
 		}
@@ -2493,6 +2841,11 @@ func (a *ARQ) checkRetransmits() {
 			info.Dispatched = false
 			info.Retries++
 			info.SampleEligible = false
+			// RTO timer fired — the segment is back on the wire as a
+			// fresh attempt, so clear the fast-retransmit guard and
+			// the OOS-ACK counter that previous ACKs accumulated.
+			info.OosAckCount = 0
+			info.FastRetransmitted = false
 			grownRTO := time.Duration(float64(info.CurrentRTO) * dataRetransmitRTOGrowthFactor)
 			maxRTO := a.maxRTO
 			if draining && maxRTO > drainRTOCap {

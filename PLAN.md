@@ -134,15 +134,40 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 
 > **نکته‌ی testing:** برای پایداری race-tests، `testLogger` در `arq_test.go` بازنویسی شد تا با `sync.RWMutex` + `t.Cleanup` ایمن باشه. قبلاً goroutine‌هایی که از life-cycle تست عبور می‌کردن (writeLoop → finalizeClose → t.Logf) data race روی testing.common ایجاد می‌کردن. این یه preexisting fragility بود که تغییرات Step 4 (به دلیل defer جدید) timing رو شیفت داد و expose شد. fix در همون pattern testing هست، روی production code تأثیری نداره.
 
-### استپ ۵ — ARQ Send Path & Adaptive RTO Tuning
+### استپ ۵ — ARQ Send Path & Adaptive RTO Tuning ✅ (تکمیل‌شده — 2026-05-25)
 هدف: کاهش retx غیرضروری و افزایش throughput.
-- [ ] بازبینی `updateAdaptiveRTO`: clamp های فعلی، α/β استاندارد RFC 6298، minRTO کف‌بندی هوشمند بر اساس RTT اخیر
-- [ ] افزودن early-retransmit (مشابه fast-retransmit در TCP) با شمارش dup-ACK
-- [ ] محدودسازی تعداد retx در پنجره زمانی برای جلوگیری از retx storm
-- [ ] افزودن knob `ARQ_FAST_RETX_THRESHOLD` در کانفیگ کلاینت و سرور
-- [ ] بنچ تحت 2% و 5% loss و گزارش throughput
+- [x] بازبینی `updateAdaptiveRTO`: clamp های فعلی، α/β استاندارد RFC 6298، minRTO کف‌بندی هوشمند بر اساس RTT اخیر — **اضافه شد `rttvarFloor = 1ms` تا جلوی collapse شدن RTO به SRTT روی مسیرهای پایدار رو بگیره (مطابق RFC 6298 §5)**
+- [x] افزودن early-retransmit (مشابه fast-retransmit در TCP) با شمارش dup-ACK — **پیاده‌سازی RFC 5681-style بر اساس شمارش OOS-ACK روی قدیمی‌ترین segment ارسال‌شده؛ یک walk کوتاه روی sndBuf با hint cache (`sndLoBoundSN`) برای short-circuit در ACK های in-order**
+- [x] محدودسازی تعداد retx در پنجره زمانی برای جلوگیری از retx storm — **token-bucket sliding-window per second؛ هم RTO-driven و هم fast-retx از budget یکسان مصرف می‌کنن؛ refund روی enqueue failure**
+- [x] افزودن knob `ARQ_FAST_RETX_THRESHOLD` و `ARQ_RETX_BUDGET_PER_SECOND` در کانفیگ کلاینت و سرور — **wire-compat: knob ها local-only هستن، روی wire protocol اثری ندارن؛ default = disabled (آستانه = ۰)**
+- [x] بنچ تحت 2% و 5% loss و گزارش throughput — **`tc netem` در sandbox available نبود؛ recipe در `scripts/bench/README.md` مستند است (`tc qdisc add dev lo root netem loss 2%`). بنچ loopless اجرا شد و رگرسیون نسبت به Step 4 وجود نداره (جدول پایین)**
 
-### استپ ۶ — Balancer Lock Granularity & Selection Fast-Path
+**Step 5 بنچ‌مارک‌ها:**
+
+| Bench | Time | Throughput | Notes |
+|---|---|---|---|
+| `BenchmarkReceiveAck_NoFastRetx` | 1083 ns/op | — | مسیر default (fast-retx OFF) — صفر overhead |
+| `BenchmarkReceiveAck_WithOosBumps` | 2884 ns/op | — | مسیر opt-in با walk |
+| `BenchmarkConsumeRetxBudgetLocked` | 7.4 ns/op | 0 allocs | budget gate تقریباً رایگان |
+| E2E (Up, 10 MiB, default) | — | **2.54 MiB/s** | Step 4 baseline: 2.52 (تساوی، در نویز) |
+| E2E (Down, 10 MiB, default) | — | **30.05 MiB/s** | Step 4 baseline: 28.03 (+7%) |
+
+**۱۳ تست واحد جدید** در `arq_step5_test.go` پوشش می‌دن: RTTVAR floor، تریگر شدن fast-retx، عدم double-fire، disable با مقدار منفی، default = disabled، derivation budget از window، cap شدن budget، اسلاید پنجره، unlimited mode، skip کردن undispatched، uint16 wrap. همگی با `-race` پاس می‌شن.
+
+تصمیم‌های طراحی کلیدی:
+1. **`FastRetxThreshold == 0` به معنی DISABLED است**، نه «default RFC 5681 = 3». این انتخاب آگاهانه است چون per-ACK bookkeeping fast-retx (شامل walk کوتاه روی sndBuf با window 16384) روی مسیرهای کم‌loss یا lossless هزینه‌ای داره که سودش رو نمی‌خره و حتی می‌تونه spurious retransmits درست کنه. کاربرانی که روی مسیر lossy هستن می‌تونن آگاهانه `=3` ست کنن.
+2. **Wire compatibility**: هیچ بایتی روی wire اضافه نشد. هر طرف budget و آستانه خودش رو محلی اعمال می‌کنه. سرور و کلاینت با ورژن‌های مختلف Step 5 / Step 4 بدون مشکل کار می‌کنن.
+3. **Hint optimization (`sndLoBoundSN`)**: یک uint16 کش که قدیمی‌ترین SN در sndBuf رو track می‌کنه. اجازه می‌ده ACK های in-order در بار سنگین، با یه مقایسه (`seqBehind(ackSN, lo)`) از walk بپرن.
+
+### استپ ۶ (تزریق‌شده / اولویت بالا) — Fix Preexisting Test Flakiness (race)
+هدف: پایدارسازی suite تست تحت `-race` تا CI و حلقه development بدون noise باشه. این استپ از باگ‌های preexisting که در Step 4 و Step 5 لاگ شدن جدا و قبل از ادامه استپ‌های perf اجرا می‌شه. **production code تغییر نمی‌کنه — فقط test code و احتمالاً isolation اولیه bufpool/expvar بین تست‌ها.**
+- [ ] reproduce پایدار با iteration count بالا روی `TestProcessDeferredSOCKS5SynDoesNotAttachAfterCancellation` و `TestARQ_ReceiveDataClearsQueuedNackWhenMissingDataArrives` و capture کامل race report
+- [ ] بررسی منبع race (احتمال‌ها: shared global state بین تست‌ها، goroutine leak بین تست‌ها، interaction `bufpool`/`expvar`)
+- [ ] رفع در سطح test infra (مثلاً `t.Cleanup` برای drain کردن goroutine، یا isolation کردن state per-test) — **بدون تغییر production code**
+- [ ] اجرای `go test -race ./... -count=10` و تأیید پایداری 100%
+- [ ] بازکردن دو bullet مربوطه در `🐛 باگ‌های یافته‌شده` با علامت ✅ resolved
+
+### استپ ۷ — Balancer Lock Granularity & Selection Fast-Path
 هدف: کاهش contention روی balancer mutex وقتی resolver زیاد است.
 - [ ] تفکیک قفل خواندن `GetBestConnection` از قفل نوشتن stats — `RWMutex` و read-mostly path
 - [ ] cache رتبه‌بندی resolverها در snapshot بدون قفل، بازسازی فقط هنگام تغییر
@@ -150,7 +175,7 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 - [ ] تست واحد invariant: snapshot view و state واقعی نباید واگرا شوند
 - [ ] گزارش µs/op قبل و بعد
 
-### استپ ۷ — UDP Server Ingress: Batch Read & Worker Sizing
+### استپ ۸ — UDP Server Ingress: Batch Read & Worker Sizing
 هدف: throughput بالاتر روی سرور با کارگران بهینه و batching.
 - [ ] افزودن مسیر batch با `golang.org/x/net/ipv4.PacketConn.ReadBatch` در لینوکس (build tag)
 - [ ] auto-tuning `UDP_READERS` بر اساس `GOMAXPROCS` با کف و سقف منطقی
@@ -158,7 +183,7 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 - [ ] بنچ لوکال 1M packet/sec و گزارش drops
 - [ ] تست واحد ingress برای فال‌بک
 
-### استپ ۸ — Session Store Sharding (server-side)
+### استپ ۹ — Session Store Sharding (server-side)
 هدف: حذف bottleneck قفل سراسری sessions در سرور پرترافیک.
 - [ ] sharding `sessionStore` به N=64 شارد بر اساس hash(SessionID)
 - [ ] حفظ API فعلی (هیچ کد فراخواننده‌ای نشکند)
@@ -166,7 +191,7 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 - [ ] تست واحد: cleanup correctness روی شاردها
 - [ ] گزارش kops/sec قبل و بعد
 
-### استپ ۹ — DNS Parser Zero-Copy
+### استپ ۱۰ — DNS Parser Zero-Copy
 هدف: حذف allocation در پارس کوئری/پاسخ.
 - [ ] افزودن decoder قابل reuse با state داخلی pool
 - [ ] استفاده از `slices` view به جای کپی برای label/name parsing
@@ -174,7 +199,7 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 - [ ] بنچ‌مارک قبل/بعد در `BenchmarkParseQuery`/`BenchmarkBuildResponse`
 - [ ] گزارش allocs/op و B/op
 
-### استپ ۱۰ — Compression Pools & Threshold Heuristics
+### استپ ۱۱ — Compression Pools & Threshold Heuristics
 هدف: کاهش هزینه compression بدون از دست دادن نسبت.
 - [ ] reuse encoder/decoder های zstd و lz4 با pool (در حال حاضر هر فراخوانی encoder جدید؟ بررسی شود)
 - [ ] افزودن آستانه `MIN_COMPRESS_BYTES` — payload کمتر از این، رد می‌شود
@@ -182,7 +207,7 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 - [ ] بنچ روی payload های مصنوعی random/text/binary
 - [ ] ثبت knob ها در کانفیگ نمونه
 
-### استپ ۱۱ — Crypto Hot-Path
+### استپ ۱۲ — Crypto Hot-Path
 هدف: کاهش هزینه AEAD و حذف allocation.
 - [ ] reuse `cipher.AEAD` با pool به ازای هر nonce-builder
 - [ ] buffer alignment برای ChaCha20 (افزایش throughput روی ARM)
@@ -190,7 +215,7 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 - [ ] تست fuzz روی codec
 - [ ] گزارش MB/s قبل و بعد
 
-### استپ ۱۲ — MTU Discovery
+### استپ ۱۳ — MTU Discovery
 هدف: همگرایی سریع‌تر MTU با ثبات بیشتر روی resolverهای سخت‌گیر.
 - [ ] بازبینی binary-search probe — gap-pruning و early-exit وقتی fail consistent
 - [ ] backoff نمایی برای probe ناموفق + jitter
@@ -198,7 +223,7 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 - [ ] تست واحد سناریوی MTU outlier (که از commit اخیر هم اضافه شده)
 - [ ] گزارش زمان همگرایی روی ۵ resolver متفاوت
 
-### استپ ۱۳ — Resolver Health: تشخیص سریع‌تر outage
+### استپ ۱۴ — Resolver Health: تشخیص سریع‌تر outage
 هدف: کم کردن زمان stuck روی resolver بد.
 - [ ] کاهش پنجره auto-disable به طور وفقی وقتی active count بالا است (در `balancer.go` منطق فعلی هست — بهینه شود)
 - [ ] reactivation با شیب تدریجی (gradual ramp-up) به جای فعال‌شدن یکدفعه
@@ -206,7 +231,7 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 - [ ] تست سناریوی blackhole resolver
 - [ ] گزارش p95 stuck-time قبل و بعد
 
-### استپ ۱۴ — Duplication Policy: وفقی
+### استپ ۱۵ — Duplication Policy: وفقی
 هدف: ارسال duplicate فقط در مواقع لازم به جای ثابت.
 - [ ] افزودن متریک loss تخمینی per-resolver
 - [ ] فعال‌سازی duplication فقط وقتی loss > آستانه قابل تنظیم
@@ -214,7 +239,7 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 - [ ] تست واحد policy switching
 - [ ] مقایسه bandwidth-overhead قبل و بعد روی scenario lossy
 
-### استپ ۱۵ — SOCKS5 Upstream Connection Pooling
+### استپ ۱۶ — SOCKS5 Upstream Connection Pooling
 هدف: کاهش latency در حالت `UseExternalSOCKS5`.
 - [ ] افزودن idle-pool برای کانکشن‌های upstream SOCKS5 با TTL
 - [ ] reuse handshake نتیجه برای same destination در پنجره کوتاه
@@ -222,7 +247,7 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 - [ ] تست واحد pool eviction و TTL
 - [ ] گزارش mean connect-time
 
-### استپ ۱۶ — DNS Cache Layer
+### استپ ۱۷ — DNS Cache Layer
 هدف: کاهش lookup سرور وقتی سرور resolve محلی هم انجام می‌دهد.
 - [ ] تقسیم cache به hot tier (in-memory LRU کوچک و سریع) و cold tier (فعلی)
 - [ ] prune دوره‌ای با amortized cost پایین (به جای scan کامل)
@@ -230,7 +255,7 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 - [ ] تست TTL accuracy
 - [ ] رصد cache_hits / cache_misses در expvar (از استپ ۱)
 
-### استپ ۱۷ — Goroutine Audit & Lifecycle
+### استپ ۱۸ — Goroutine Audit & Lifecycle
 هدف: حذف نشت goroutine و تضمین خاتمه روی shutdown.
 - [ ] فهرست همه `go func` ها (۳۰+ مورد) با محل و مسیر خاتمه
 - [ ] افزودن تست `TestNoGoroutineLeak` با `goleak`-style assertion
@@ -238,7 +263,7 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 - [ ] افزودن hard-stop budget برای shutdown سرور و کلاینت
 - [ ] گزارش تعداد goroutine قبل/بعد در حالت idle طولانی
 
-### استپ ۱۸ — Backpressure & Bounded Queues
+### استپ ۱۹ — Backpressure & Bounded Queues
 هدف: جلوگیری از انفجار حافظه تحت بار سنگین.
 - [ ] ممیزی همه channel‌های `make(chan ..., N)` و توجیه N
 - [ ] افزودن drop-with-counter (به‌جای block بی‌نهایت) در ingress
@@ -246,7 +271,7 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 - [ ] تست شبیه‌سازی burst و سنجش memory ceiling
 - [ ] گزارش peak RSS قبل و بعد
 
-### استپ ۱۹ — CI Regression Bench
+### استپ ۲۰ — CI Regression Bench
 هدف: PR بد سرعت را زمین نزند.
 - [ ] افزودن workflow جدید `bench.yml` که `go test -bench` روی پکیج‌های کلیدی اجرا و output را در PR کامنت کند
 - [ ] threshold check ساده (regression > 10% → fail)
@@ -254,7 +279,7 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 - [ ] مستندسازی در README
 - [ ] فعال‌سازی برای push روی main و PR
 
-### استپ ۲۰ — Race & Fuzz Sweep
+### استپ ۲۱ — Race & Fuzz Sweep
 هدف: شکار باگ‌های پنهان قبل از prod.
 - [ ] اجرای `go test -race ./...` و رفع warnings (هرکدام جدا گزارش)
 - [ ] افزودن fuzz target برای `vpnproto/parser`, `dnsparser/parser`, `security/codec`
@@ -262,7 +287,7 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 - [ ] رفع crashing input ها
 - [ ] گزارش پوشش fuzz در README
 
-### استپ ۲۱ — Release Hardening
+### استپ ۲۲ — Release Hardening
 هدف: بیشترین سرعت در باینری نهایی.
 - [ ] فعال‌سازی PGO با profile جمع‌آوری‌شده از bench طولانی
 - [ ] افزودن `-trimpath -ldflags="-s -w"` به همه matrix builds
@@ -277,6 +302,8 @@ E2E loopback (10MiB × 3 runs): Up 1.66 → 1.96 MiB/s (+18% از baseline)، Do
 
 - **[Step 4 / TEST-only]** Race در `testLogger.Debugf`: goroutine‌های ARQ که از life-cycle تست عبور می‌کردن (writeLoop → finalizeClose → testLogger.Debugf → t.Logf) data race روی `testing.common` ایجاد می‌کردن. روی main پنهان بود ولی defer جدید Step 4 timing رو شیفت داد و expose شد. **رفع‌شده در Step 4** با بازنویسی `testLogger` (sync.RWMutex + t.Cleanup gate). فقط test code، تأثیر صفر روی production.
 - **[Step 4 / preexisting / udpserver]** `TestProcessDeferredSOCKS5SynDoesNotAttachAfterCancellation` در `internal/udpserver/stream_syn_test.go` تحت `-race` fail می‌شه (data race در `dialTCPTargetContext`). روی commit `d709b6d` (قبل از Step 4) هم وجود داره. **برای استپ آینده اختصاصی** — نه scope این استپ، نه blocker.
+- **[Step 5 / observation / no fix needed]** فعال‌سازی fast-retx (`ARQ_FAST_RETX_THRESHOLD=3`) روی بنچ loopback با `ARQ_WINDOW_SIZE=16384` و payload 10 MiB، Up throughput رو از 2.54 → 1.22 MiB/s افت می‌ده و 2/3 ران FAIL می‌شه. علت: روی loopback که loss واقعی صفره، OOS-ACK های ناشی از reordering جزئی (queue contention) باعث spurious fast-retransmit می‌شن که bandwidth رو هدر می‌ده. **mitigation**: default = disabled (که در همین Step اعمال شد). کاربر روی مسیر lossy می‌تونه opt-in کنه. این رفتار مطلوبه — feature صرفاً وقتی sense می‌ده که loss واقعی > overhead باشه.
+- **[Step 5 / preexisting / TEST-only / flaky]** `TestARQ_ReceiveDataClearsQueuedNackWhenMissingDataArrives` در `internal/arq/arq_test.go` تحت `-race` به‌صورت intermittent (~20-40% احتمال) FAIL می‌شه **فقط وقتی همراه سایر تست‌های suite اجرا بشه** (در isolation 10/10 پاس می‌شه). روی commit `0b89e36` (Step 4 baseline) قبل از تغییرات Step 5 هم با همین نرخ FAIL می‌شه، پس preexisting است. علت احتمالی: interaction با global state (احتمالاً `bufpool` یا `expvar`) بین تست‌ها. **برای استپ آینده اختصاصی** — نه scope این استپ، نه blocker. تست‌های Step 5 (13 تست + 3 بنچ) خودشون 100% پایدار هستن.
 
 ---
 

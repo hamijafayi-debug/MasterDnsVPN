@@ -114,6 +114,11 @@ type ClientConfig struct {
 	ARQDataNackRepeatSeconds              float64           `toml:"ARQ_DATA_NACK_REPEAT_SECONDS"`
 	ARQTerminalDrainTimeoutSec            float64           `toml:"ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS"`
 	ARQTerminalAckWaitTimeoutSec          float64           `toml:"ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS"`
+	// Step 5 — fast-retransmit & retx budget. Both local-only knobs (not on
+	// the wire, never negotiated). 0 = library default; negative = disabled
+	// for FastRetx, unlimited for RetxBudget.
+	ARQFastRetxThreshold                  int               `toml:"ARQ_FAST_RETX_THRESHOLD"`
+	ARQRetxBudgetPerSecond                int               `toml:"ARQ_RETX_BUDGET_PER_SECOND"`
 	Resolvers                             []ResolverAddress `toml:"-"`
 	ResolverMap                           map[string]int    `toml:"-"`
 }
@@ -214,6 +219,10 @@ func defaultClientConfig() ClientConfig {
 		ARQDataNackRepeatSeconds:              1.0,
 		ARQTerminalDrainTimeoutSec:            120.0,
 		ARQTerminalAckWaitTimeoutSec:          90.0,
+		// Step 5 defaults — 0 means "use the ARQ library default"
+		// (3 OOS-ACKs to trigger fast retx; 4×WindowSize retx/sec cap).
+		ARQFastRetxThreshold:                  0,
+		ARQRetxBudgetPerSecond:                0,
 	}
 }
 

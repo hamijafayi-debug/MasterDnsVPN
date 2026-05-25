@@ -86,6 +86,10 @@ type ServerConfig struct {
 	ARQDataNackRepeatSeconds          float64  `toml:"ARQ_DATA_NACK_REPEAT_SECONDS"`
 	ARQTerminalDrainTimeoutSec        float64  `toml:"ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS"`
 	ARQTerminalAckWaitTimeoutSec      float64  `toml:"ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS"`
+	// Step 5 — fast-retransmit & retx budget. Local-only knobs (not on the
+	// wire). 0 = library default; negative semantics mirror the client.
+	ARQFastRetxThreshold              int      `toml:"ARQ_FAST_RETX_THRESHOLD"`
+	ARQRetxBudgetPerSecond            int      `toml:"ARQ_RETX_BUDGET_PER_SECOND"`
 	MaxAllowedClientActiveSessions    int      `toml:"MAX_ALLOWED_CLIENT_ACTIVE_SESSION"`
 	MaxAllowedClientActiveStreams     int      `toml:"MAX_ALLOWED_CLIENT_ACTIVE_STREAMS_PER_SESSION"`
 	ClientMaxPacketDuplicationCount   int      `toml:"MAX_ALLOWED_CLIENT_PACKET_DUPLICATION_COUNT"`
@@ -173,6 +177,9 @@ func defaultServerConfig() ServerConfig {
 		ARQDataNackRepeatSeconds:          1.0,
 		ARQTerminalDrainTimeoutSec:        120.0,
 		ARQTerminalAckWaitTimeoutSec:      90.0,
+		// Step 5 — defaults preserve ARQ library defaults.
+		ARQFastRetxThreshold:              0,
+		ARQRetxBudgetPerSecond:            0,
 		MaxAllowedClientActiveSessions:    255,
 		MaxAllowedClientActiveStreams:     2000,
 		ClientMaxPacketDuplicationCount:   5,

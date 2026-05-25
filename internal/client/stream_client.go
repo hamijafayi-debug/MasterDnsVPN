@@ -152,6 +152,8 @@ func (c *Client) new_stream(streamID uint16, conn net.Conn, targetPayload []byte
 		TerminalAckWaitTimeout:      c.cfg.ARQTerminalAckWaitTimeoutSec,
 		CompressionType:             c.uploadCompression,
 		IsClient:                    true,
+		FastRetxThreshold:           c.cfg.ARQFastRetxThreshold,
+		RetxBudgetPerSec:            c.cfg.ARQRetxBudgetPerSecond,
 	}
 
 	a := arq.NewARQ(streamID, c.sessionID, s, conn, mtu, c.log, arqCfg)

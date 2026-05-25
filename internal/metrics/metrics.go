@@ -110,6 +110,19 @@ var (
 	// duplication policy effectiveness (step 14).
 	ArqDuplicateRx = &Counter{}
 
+	// ArqFastRetx counts data retransmissions triggered by the
+	// out-of-order-ACK fast-retransmit heuristic (step 5). A non-zero rate
+	// here means the path is reordering or losing segments but ACKs of
+	// later segments are still arriving — i.e. we recover faster than the
+	// RTO timer would have allowed.
+	ArqFastRetx = &Counter{}
+
+	// ArqRetxBudgetDropped counts retransmission attempts that were
+	// suppressed because the per-second retx budget was exhausted
+	// (step 5). A non-zero value indicates either a genuinely bad path or
+	// a budget tuned too aggressively.
+	ArqRetxBudgetDropped = &Counter{}
+
 	// SessionsActive is a gauge: number of sessions currently considered
 	// alive by the local node.
 	SessionsActive = &Counter{}
@@ -127,6 +140,8 @@ func init() {
 	register("masterdnsvpn_bytes_out", BytesOut)
 	register("masterdnsvpn_arq_retx", ArqRetx)
 	register("masterdnsvpn_arq_duplicate_rx", ArqDuplicateRx)
+	register("masterdnsvpn_arq_fast_retx", ArqFastRetx)
+	register("masterdnsvpn_arq_retx_budget_dropped", ArqRetxBudgetDropped)
 	register("masterdnsvpn_sessions_active", SessionsActive)
 	register("masterdnsvpn_cache_hits", CacheHits)
 	register("masterdnsvpn_cache_misses", CacheMisses)
@@ -152,6 +167,8 @@ func Collect() []Snapshot {
 		{"bytes_out", BytesOut.Value()},
 		{"arq_retx", ArqRetx.Value()},
 		{"arq_duplicate_rx", ArqDuplicateRx.Value()},
+		{"arq_fast_retx", ArqFastRetx.Value()},
+		{"arq_retx_budget_dropped", ArqRetxBudgetDropped.Value()},
 		{"sessions_active", SessionsActive.Value()},
 		{"cache_hits", CacheHits.Value()},
 		{"cache_misses", CacheMisses.Value()},

@@ -322,6 +322,30 @@ ARQ_DATA_NACK_REPEAT_SECONDS = 0.8
 ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS = 120.0
 ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS = 90.0
 
+# Fast-retransmit and retx-budget tuning (Step 5).
+# Both knobs are local-only — they never appear on the wire and do not need to
+# match between client and server.
+#
+# ARQ_FAST_RETX_THRESHOLD: number of out-of-order ACKs (ACKs for higher
+# sequence numbers) that must accumulate against an older, still-un-acked
+# segment before that segment is retransmitted immediately, without waiting
+# for the RTO timer. Analogous to TCP's 3-duplicate-ACK rule (RFC 5681).
+# Default is OFF — enabling this adds per-ACK bookkeeping work and is only
+# worthwhile on genuinely lossy paths. On clean networks (datacenter, LAN,
+# loopback) the RTO-driven retransmit is already sufficient and faster.
+#   0  → disabled (default) — keep zero-overhead ACK fast-path
+#   <0 → disabled (explicit, same as 0)
+#   >0 → enabled with this threshold; 3 is the RFC 5681 canonical value
+ARQ_FAST_RETX_THRESHOLD = 0
+#
+# ARQ_RETX_BUDGET_PER_SECOND: ceiling on the total data retransmissions
+# (RTO-driven *plus* fast-retransmit) this stream may emit per second.
+# Prevents pathological retx storms on genuinely lossy paths.
+#   0  → library default (4 × ARQ_WINDOW_SIZE, floor 256, ceiling 65535)
+#   <0 → unlimited
+#   >0 → custom cap
+ARQ_RETX_BUDGET_PER_SECOND = 0
+
 # ------------------------------------------------------------------------------
 # 9) Logging
 # What this section does:
