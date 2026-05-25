@@ -69,6 +69,32 @@ type ServerConfig struct {
 	SOCKS5Auth                        bool     `toml:"SOCKS5_AUTH"`
 	SOCKS5User                        string   `toml:"SOCKS5_USER"`
 	SOCKS5Pass                        string   `toml:"SOCKS5_PASS"`
+	// Step 17 — Upstream SOCKS5 connection pool.
+	//
+	// When UseExternalSOCKS5 is true every new stream costs a fresh TCP
+	// handshake + SOCKS5 greeting + (optional) auth before the CONNECT
+	// request can even be sent. On lossy links that adds up to two extra
+	// round-trips per stream. The pool keeps idle TCP connections that
+	// have already completed greeting + auth, so a new stream only pays
+	// the CONNECT + reply latency.
+	//
+	//   * SOCKS5PoolMaxIdle — maximum number of pre-authenticated
+	//     connections held idle. 0 disables the pool (legacy behaviour).
+	//   * SOCKS5PoolIdleTTLSeconds — how long an idle connection may sit
+	//     in the pool before it's closed. 0 with MaxIdle>0 falls back to
+	//     30 seconds. Typical upstream proxies idle-time-out around
+	//     60-300s; keep this below.
+	//   * SOCKS5PoolPrewarm — target number of connections the background
+	//     refill worker maintains. Must be ≤ MaxIdle. 0 disables
+	//     pre-warming; the pool is then populated lazily on stream
+	//     close (when an unused connection is "put back").
+	//
+	// All knobs are local-only — nothing about them is observable on the
+	// VPN wire, so an unmodified client talks to a pool-enabled server
+	// identically to one running with the legacy code path.
+	SOCKS5PoolMaxIdle                 int      `toml:"SOCKS5_POOL_MAX_IDLE"`
+	SOCKS5PoolIdleTTLSeconds          float64  `toml:"SOCKS5_POOL_IDLE_TTL_SECONDS"`
+	SOCKS5PoolPrewarm                 int      `toml:"SOCKS5_POOL_PREWARM"`
 	ForwardIP                         string   `toml:"FORWARD_IP"`
 	ForwardPort                       int      `toml:"FORWARD_PORT"`
 	Domain                            []string `toml:"DOMAIN"`
@@ -165,6 +191,11 @@ func defaultServerConfig() ServerConfig {
 		SOCKS5Auth:                        false,
 		SOCKS5User:                        "admin",
 		SOCKS5Pass:                        "123456",
+		// Step 17 — pool disabled by default to preserve the legacy
+		// per-stream-handshake behaviour. Operators opt in explicitly.
+		SOCKS5PoolMaxIdle:                 0,
+		SOCKS5PoolIdleTTLSeconds:          30.0,
+		SOCKS5PoolPrewarm:                 0,
 		ForwardIP:                         "",
 		ForwardPort:                       1080,
 		Domain:                            nil,
@@ -412,6 +443,32 @@ func finalizeServerConfig(cfg ServerConfig) (ServerConfig, error) {
 
 	if cfg.DNSCacheTTLSeconds <= 0 {
 		cfg.DNSCacheTTLSeconds = 3600.0
+	}
+
+	// Step 17 — clamp the SOCKS5 upstream pool knobs.
+	//   * MaxIdle floor at 0 (disable) and ceiling at 4096 (sanity cap
+	//     against accidental fd exhaustion).
+	//   * IdleTTL defaults to 30s when the pool is enabled but no TTL
+	//     was supplied; ceiling at 24h.
+	//   * Prewarm capped to MaxIdle so the refill worker can't spin
+	//     forever trying to exceed it.
+	if cfg.SOCKS5PoolMaxIdle < 0 {
+		cfg.SOCKS5PoolMaxIdle = 0
+	}
+	if cfg.SOCKS5PoolMaxIdle > 4096 {
+		cfg.SOCKS5PoolMaxIdle = 4096
+	}
+	if cfg.SOCKS5PoolMaxIdle > 0 && cfg.SOCKS5PoolIdleTTLSeconds <= 0 {
+		cfg.SOCKS5PoolIdleTTLSeconds = 30.0
+	}
+	if cfg.SOCKS5PoolIdleTTLSeconds > 86400.0 {
+		cfg.SOCKS5PoolIdleTTLSeconds = 86400.0
+	}
+	if cfg.SOCKS5PoolPrewarm < 0 {
+		cfg.SOCKS5PoolPrewarm = 0
+	}
+	if cfg.SOCKS5PoolPrewarm > cfg.SOCKS5PoolMaxIdle {
+		cfg.SOCKS5PoolPrewarm = cfg.SOCKS5PoolMaxIdle
 	}
 
 	if cfg.ForwardPort < 0 || cfg.ForwardPort > 65535 {

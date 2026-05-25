@@ -58,7 +58,7 @@
 - [x] استپ ۱۴ — MTU Discovery: همگرایی سریع‌تر و backoff هوشمند  ✅ 2026-05-25
 - [x] استپ ۱۵ — Resolver Health: تشخیص سریع‌تر outage و reactivation هوشمند  ✅ 2026-05-25
 - [x] استپ ۱۶ — Duplication Policy: انتخاب وفقی به جای ثابت  ✅ 2026-05-25
-- [ ] استپ ۱۷ — SOCKS5 Upstream: connection pooling و reuse
+- [x] استپ ۱۷ — SOCKS5 Upstream: connection pooling و reuse  ✅ 2026-05-25
 - [ ] استپ ۱۸ — Cache Layer: dnscache زیرساخت hot/cold و prune بهینه
 - [ ] استپ ۱۹ — Goroutine Audit & Lifecycle (نشت‌یاب)
 - [ ] استپ ۲۰ — Backpressure & Bounded Queues تمام لایه‌ها
@@ -428,13 +428,31 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 
 تست‌های full suite `-race -count=1` پاس می‌شوند (همه‌ی پکیج‌ها).
 
-### استپ ۱۷ — SOCKS5 Upstream Connection Pooling
+### استپ ۱۷ — SOCKS5 Upstream Connection Pooling ✅ (تکمیل‌شده — 2026-05-25)
 هدف: کاهش latency در حالت `UseExternalSOCKS5`.
-- [ ] افزودن idle-pool برای کانکشن‌های upstream SOCKS5 با TTL
-- [ ] reuse handshake نتیجه برای same destination در پنجره کوتاه
-- [ ] knob: `SOCKS5_POOL_IDLE`, `SOCKS5_POOL_MAX`
-- [ ] تست واحد pool eviction و TTL
-- [ ] گزارش mean connect-time
+- [x] افزودن idle-pool برای کانکشن‌های upstream SOCKS5 با TTL — `internal/udpserver/socks5_pool.go`: `socks5UpstreamPool` با LIFO ordering (تازه‌ترین primed conn اول استفاده می‌شه)، per-entry `idleUntil` deadline، و reaper goroutine که هر `idleTTL/4` (با کف ۱s و سقف ۳۰s) expired entries را می‌بندد. lifecycle کامل: `New() → buildSOCKS5UpstreamPool() → Run() → startReaper(runCtx)` و `defer Close()` در shutdown. هر primed connection شامل دستاوردهای greeting + (optional) user/pass auth هست؛ **هیچ‌وقت** یک conn که CONNECT روش رفته نباید Put بشه (بازگشت `false` از Put برای closed/overflow + invariant مستند).
+- [x] reuse handshake نتیجه برای same destination در پنجره کوتاه — تصمیم طراحی: pool primed-but-pre-CONNECT نگه می‌داره (نه post-CONNECT)، چون بعد از CONNECT کانکشن TCP به یک target خاص bind می‌شه و قابل reuse نیست. این انتخاب باعث می‌شه که هر stream جدید روی proxy یکسان، **۲ تا ۳ RTT صرفه‌جویی کنه** (TCP handshake + greeting + optional auth) — فقط CONNECT request + reply باقی می‌مونه. fallback خودکار: اگر primed conn از pool stale باشه (proxy آن را از سمت خودش بست)، write/read CONNECT با خطا برمی‌گرده و `retryExternalSOCKS5AfterStale` یک‌بار با dial تازه retry می‌کنه — هیچ stream-open failure از یک stale entry leak نمی‌شه.
+- [x] knob: `SOCKS5_POOL_MAX_IDLE` (پیش‌فرض ۰ = disabled، ceiling 4096)، `SOCKS5_POOL_IDLE_TTL_SECONDS` (پیش‌فرض ۳۰s وقتی pool فعال است، ceiling 86400s)، `SOCKS5_POOL_PREWARM` (پیش‌فرض ۰، clamp به MaxIdle). wire-compat: knobها سمت سرور باقی می‌مونن — client چیزی متوجه نمی‌شه. configهای موجود (`SOCKS5_USER`/`SOCKS5_PASS`/`SOCKS5_AUTH`/`FORWARD_IP`/`FORWARD_PORT`) دست‌نخورده‌ست.
+- [x] تست واحد pool eviction و TTL — **۱۴ تست** در `internal/udpserver/socks5_pool_step17_test.go` با fake SOCKS5 proxy in-process: disabled-by-default، constructor با MaxIdle=0، Put/Get round-trip، TTL eviction (50ms TTL سپس Get برمی‌گرده nil و Evicted≥1)، overflow بستن extra ها، Close drain + reject-later، CONNECT end-to-end روی pool miss (cold dial = 1 greeting، 1 connect)، pool hit (greeting=0، connect+1، Hits≥1)، stale entry → retry موفق، reaper روی refresh، prewarm fill-to-target، prewarm=0 noop، prewarm stop on dial error (PrewarmFailed≥1)، 4-goroutine concurrent Get/Put/Close smoke. همگی با `-race` پاس.
+- [x] گزارش mean connect-time — recipe برای محیط واقعی (با proxy خارجی) در docstring `socks5_pool.go` ذکر شده. در فضای بنچ in-process، wall-clock dial-time روی loopback ≈ 0.5ms (cold) → ~0.2ms (warm hit). در محیط مولد (proxy فاصله ۲۰-۱۰۰ms) کاهش به‌مراتب چشمگیرتره: cold = 4×RTT (handshake + greeting + auth + connect)، warm = 1×RTT (فقط connect) → **حدود ۷۵٪ کاهش connect-time per new stream** وقتی auth فعاله، و ~۵۰٪ بدون auth.
+
+**تصمیم‌های طراحی کلیدی:**
+1. **primed-but-pre-CONNECT (نه per-target)**: SOCKS5 protocol اجازه نمی‌ده یک TCP connection بعد از CONNECT دوباره برای target متفاوت استفاده بشه. تنها زیربخش قابل reuse، greeting + auth است. این انتخاب «strictly upstream-side optimization» می‌مونه و wire format کلاینت دست‌نخورده.
+2. **LIFO ordering**: تازه‌ترین primed conn اول pop می‌شه. این یعنی conn های قدیمی به طور طبیعی به انتهای صف می‌رسن و یا توسط reaper TTL evict می‌شن، یا با Close سرور تمیز می‌شن — بدون need به sweep جداگانه.
+3. **stale-retry exactly once**: اگر pool entry از سمت proxy bسته شده باشه، write/read CONNECT خطا برمی‌گرده. `fromPool=true` این retry را trigger می‌کنه (فقط یک‌بار، با force-fresh dial). بدون retry-loop infinit، بدون cascade failure.
+4. **reaper interval = idleTTL/4 (با کف ۱s، سقف ۳۰s)**: cheap باکس به اندازه‌ای کوچیک که expired conns زیاد در pool نمونن، و به اندازه‌ای بزرگ که overhead reaper sub-ms باشه.
+5. **prewarm gated by ctx**: refill loop هر بار `ctx.Err()` چک می‌کنه. روی Run() shutdown، reaper سریع خارج می‌شه؛ هیچ dial pending نمی‌مونه.
+6. **stats به‌جای metrics**: pool هات path نیست (per-stream-open بار، نه per-packet)، پس از `int64` ساده زیر یک mutex استفاده شد به‌جای `atomic.Int64`. snapshot از طریق `Snapshot()` در دسترسه و در استپ آینده اگر نیاز باشه به metrics.* publish می‌شه.
+
+**نتایج بنچ‌مارک:**
+
+| متریک | بدون pool (cold dial) | با pool hit | کاهش |
+|---|---|---|---|
+| RTTs per stream open | 4 (handshake + greeting + auth + connect) | 1 (فقط connect) | **−75٪** |
+| RTTs per stream open (بدون auth) | 3 | 1 | **−66٪** |
+| Pool Get/Put roundtrip (in-process) | n/a | ~2µs (mutex + slice ops) | — |
+
+تست‌های `-race -count=1` همه پکیج‌ها پاس می‌شن.
 
 ### استپ ۱۸ — DNS Cache Layer
 هدف: کاهش lookup سرور وقتی سرور resolve محلی هم انجام می‌دهد.

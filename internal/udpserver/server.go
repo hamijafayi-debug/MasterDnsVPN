@@ -68,6 +68,11 @@ type Server struct {
 	externalSOCKS5Auth       bool
 	externalSOCKS5User       []byte
 	externalSOCKS5Pass       []byte
+	// Step 17 — pre-authenticated TCP connections to the upstream SOCKS5
+	// proxy. nil when pooling is disabled or USE_EXTERNAL_SOCKS5=false.
+	// Always check pool.Enabled() before reaching for Get/Put — the
+	// pointer can be non-nil for a disabled pool too.
+	socks5UpstreamPool       *socks5UpstreamPool
 	streamOutboundTTL        time.Duration
 	streamOutboundMaxRetry   int
 	mtuProbePayloadPool      sync.Pool
@@ -119,7 +124,7 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 	sessions := newSessionStore(cfg.EffectiveSessionOrphanQueueInitialCap(), cfg.EffectiveStreamQueueInitialCapacity(), cfg.SessionInitReuseTTL(), cfg.RecentlyClosedStreamTTL(), cfg.RecentlyClosedStreamCap)
 	sessions.maxActiveSessions = cfg.MaxAllowedClientActiveSessions
 	sessions.maxActiveStreams = cfg.MaxAllowedClientActiveStreams
-	return &Server{
+	srv := &Server{
 		cfg:                    cfg,
 		log:                    log,
 		codec:                  codec,
@@ -171,6 +176,11 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 			},
 		},
 	}
+	// Step 17 — build the SOCKS5 upstream pool now that the server fields
+	// it depends on (dialer fn, address, auth flag) are populated. The
+	// pool is wired but not started; Run() invokes startReaper(ctx).
+	srv.socks5UpstreamPool = srv.buildSOCKS5UpstreamPool()
+	return srv
 }
 
 type throttledLogState struct {
@@ -326,6 +336,13 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.deferredDNSSession.Start(runCtx)
 	s.deferredConnectSession.Start(runCtx)
+	// Step 17 — kick the SOCKS5 upstream pool reaper. No-op when the
+	// pool is disabled (Enabled() == false). The reaper exits when
+	// runCtx is cancelled OR socks5UpstreamPool.Close is invoked below.
+	if s.socks5UpstreamPool != nil {
+		s.socks5UpstreamPool.startReaper(runCtx)
+		defer s.socks5UpstreamPool.Close()
+	}
 	s.startDNSWorkers(runCtx, conns[0], reqCh, &workerWG)
 
 	go func() {
