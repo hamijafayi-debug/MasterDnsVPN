@@ -443,17 +443,6 @@ func (c *Client) clearSessionInitBusyUntil() {
 	c.sessionInitBusyUnix.Store(0)
 }
 
-func (c *Client) sessionInitBusyUntil() time.Time {
-	if c == nil {
-		return time.Time{}
-	}
-	unixNano := c.sessionInitBusyUnix.Load()
-	if unixNano <= 0 {
-		return time.Time{}
-	}
-	return time.Unix(0, unixNano)
-}
-
 func (c *Client) buildSessionQuery(domain string, packetType uint8, payload []byte) ([]byte, error) {
 	return c.buildTunnelQuery(domain, 0, packetType, payload)
 }

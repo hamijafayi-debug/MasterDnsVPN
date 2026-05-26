@@ -79,8 +79,8 @@ type socks5UpstreamPool struct {
 	log      *logger.Logger
 	addr     string
 	hasAuth  bool
-	greeting func() []byte                            // returns the greeting bytes (no-auth or user/pass)
-	prime    func(conn net.Conn) error                // performs greeting+auth on a fresh conn
+	greeting func() []byte             // returns the greeting bytes (no-auth or user/pass)
+	prime    func(conn net.Conn) error // performs greeting+auth on a fresh conn
 	dial     func(ctx context.Context) (net.Conn, error)
 
 	// Lifetime / reaper bookkeeping. closed is set during Close so Put
@@ -104,13 +104,13 @@ type socks5UpstreamPool struct {
 // observability story can layer on top via metrics.* later without
 // breaking the API.
 type socks5PoolStats struct {
-	Gets           int64 // every Get call
-	Hits           int64 // Get that returned a primed conn
-	Puts           int64 // every Put call (regardless of acceptance)
-	Inserted       int64 // Put that actually accepted the conn
-	Evicted        int64 // entries closed due to TTL expiry
-	OverflowClosed int64 // entries closed because pool was full at Put time
-	PrewarmFailed  int64 // background prewarm dial attempts that failed
+	Gets             int64 // every Get call
+	Hits             int64 // Get that returned a primed conn
+	Puts             int64 // every Put call (regardless of acceptance)
+	Inserted         int64 // Put that actually accepted the conn
+	Evicted          int64 // entries closed due to TTL expiry
+	OverflowClosed   int64 // entries closed because pool was full at Put time
+	PrewarmFailed    int64 // background prewarm dial attempts that failed
 	PrewarmSucceeded int64
 }
 

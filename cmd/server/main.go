@@ -77,7 +77,8 @@ func main() {
 	switch {
 	case effectiveJSONBase64 != "":
 		cfg, err = config.LoadServerConfigFromJSONBase64WithOverrides(effectiveJSONBase64, overrides)
-		resolvedConfigPath = cfg.ConfigPath
+		// resolvedConfigPath is not used after this branch; cfg.ConfigPath is
+		// authoritative for downstream consumers.
 	case effectiveJSONPath != "":
 		resolvedConfigPath = runtimepath.Resolve(effectiveJSONPath)
 		cfg, err = config.LoadServerConfigWithOverrides(resolvedConfigPath, overrides)

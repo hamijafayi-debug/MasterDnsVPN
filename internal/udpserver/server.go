@@ -72,33 +72,37 @@ type Server struct {
 	// proxy. nil when pooling is disabled or USE_EXTERNAL_SOCKS5=false.
 	// Always check pool.Enabled() before reaching for Get/Put — the
 	// pointer can be non-nil for a disabled pool too.
-	socks5UpstreamPool       *socks5UpstreamPool
-	streamOutboundTTL        time.Duration
-	streamOutboundMaxRetry   int
-	mtuProbePayloadPool      sync.Pool
-	packetPool               sync.Pool
-	deferredInflightMu       sync.Mutex
-	deferredInflight         map[uint64]struct{}
-	deferredInflightIndex    map[uint8]map[uint16]map[uint64]struct{}
-	immediateConnectedLog    throttledLogState
-	invalidSessionDropLog    throttledLogState
-	droppedPackets           atomic.Uint64
-	lastDropLogUnix          atomic.Int64
-	deferredDroppedPackets   atomic.Uint64
-	lastDeferredDropLogUnix  atomic.Int64
-	pongNonce                atomic.Uint32
-	invalidDropMode          atomic.Uint32
+	socks5UpstreamPool      *socks5UpstreamPool
+	mtuProbePayloadPool     sync.Pool
+	packetPool              sync.Pool
+	deferredInflightMu      sync.Mutex
+	deferredInflight        map[uint64]struct{}
+	deferredInflightIndex   map[uint8]map[uint16]map[uint64]struct{}
+	invalidSessionDropLog   throttledLogState
+	droppedPackets          atomic.Uint64
+	lastDropLogUnix         atomic.Int64
+	deferredDroppedPackets  atomic.Uint64
+	lastDeferredDropLogUnix atomic.Int64
+	pongNonce               atomic.Uint32
+	invalidDropMode         atomic.Uint32
 	// Step 19 — bookkeeping for background goroutines whose lifetimes
 	// are bounded only by ctx.Done(). Run() uses this to guarantee no
 	// goroutine outlives the call (deterministic teardown).
 	backgroundWG sync.WaitGroup
 }
 
+// request is the per-packet message flowing from reader goroutines to DNS
+// worker goroutines. Step 26 (SYNC-POOL-NONPTR): `bufPtr` holds the raw
+// *[]byte returned by packetPool.Get so the buffer can be released back to
+// the pool without re-boxing the slice header (which costs a 24-byte heap
+// allocation per packet on the ingress hot path). `buf` remains for legacy
+// call sites that read packet contents — it points at the same backing array.
 type request struct {
-	buf  []byte
-	size int
-	addr *net.UDPAddr
-	conn *net.UDPConn
+	bufPtr *[]byte
+	buf    []byte
+	size   int
+	addr   *net.UDPAddr
+	conn   *net.UDPConn
 }
 
 type postSessionValidation struct {
@@ -156,8 +160,12 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 		socks5Fragments:    fragmentStore.New[socks5FragmentKey](cfg.EffectiveSOCKS5FragmentStoreCapacity()),
 		dnsFragmentTimeout: dnsFragmentTimeout,
 		dnsUpstreamBufferPool: sync.Pool{
+			// Step 26 — pool stores *[]byte (pointer-like) to dodge the slice
+			// header heap-alloc that SA6002 warns about. Sites Get -> *[]byte,
+			// Put returns the same pointer.
 			New: func() any {
-				return make([]byte, 65535)
+				buf := make([]byte, 65535)
+				return &buf
 			},
 		},
 		dialStreamUpstreamFn: func(network string, address string, timeout time.Duration) (net.Conn, error) {
@@ -176,15 +184,22 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 		externalSOCKS5User:       []byte(cfg.SOCKS5User),
 		externalSOCKS5Pass:       []byte(cfg.SOCKS5Pass),
 		mtuProbePayloadPool: sync.Pool{
+			// Step 26 — pool stores *[]byte (pointer-like). See SYNC-POOL-NONPTR.
 			New: func() any {
-				return make([]byte, mtuProbeMaxDownSize)
+				buf := make([]byte, mtuProbeMaxDownSize)
+				return &buf
 			},
 		},
 		deferredInflight:      make(map[uint64]struct{}, 128),
 		deferredInflightIndex: make(map[uint8]map[uint16]map[uint64]struct{}, 64),
 		packetPool: sync.Pool{
+			// Step 26 — pool stores *[]byte (pointer-like). This is the hottest
+			// pool on the server (one Get/Put per inbound packet on the ingress
+			// fast path); the SYNC-POOL-NONPTR refactor eliminates a slice-
+			// header heap allocation per packet on multi-Mpps workloads.
 			New: func() any {
-				return make([]byte, cfg.MaxPacketSize)
+				buf := make([]byte, cfg.MaxPacketSize)
+				return &buf
 			},
 		},
 	}

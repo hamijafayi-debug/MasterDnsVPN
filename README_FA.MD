@@ -491,6 +491,107 @@ sudo journalctl -u masterdnsvpn-client -f
 
 ---
 
+### بخش ۲.۷: 🧑‍💻 اجرای مستقیم از سورس (Go)
+
+> ⚠️ این بخش برای توسعه‌دهندگانی است که می‌خواهند سورس Go را مستقیماً اجرا کنند یا بیلد سفارشی بسازند.
+
+#### پیش‌نیاز
+
+- نصب **Go نسخه `1.25` یا جدیدتر** (مطابق با دایرکتیو `go` در فایل `go.mod`). دانلود رسمی: <https://go.dev/dl/>
+- ابزار `git` و `make` (روی macOS/Linux معمولاً به‌صورت پیش‌فرض موجودند).
+
+#### گام ۲.۷.۱: کلون کردن سورس و دانلود وابستگی‌ها
+
+```bash
+git clone https://github.com/hamijafayi-debug/MasterDnsVPN.git
+cd MasterDnsVPN
+go mod download
+```
+
+#### گام ۲.۷.۲: ساخت باینری‌ها
+
+روش پیشنهادی — استفاده از `Makefile` (تضمین می‌کند فلگ‌های release/PGO/strip درست اعمال شوند):
+
+```bash
+# بیلد توسعه — باینری‌های قابل اجرا با debug symbols
+make build
+# → bin/masterdnsvpn-client و bin/masterdnsvpn-server
+
+# بیلد release قابل حمل (روی هر CPU x86-64 اجرا می‌شود، GOAMD64=v1)
+make release
+# → bin/masterdnsvpn-{client,server}-release  (حدود ۸ مگابایت، stripped + trimpath)
+
+# بیلد release مدرن (CPU های Haswell به بعد — AVX2/BMI، سریع‌تر)
+make release-modern
+# → bin/masterdnsvpn-{client,server}-release-v3
+
+# بیلد release با PGO (Profile-Guided Optimization)
+make pgo-collect   # ~۳۰ ثانیه: بنچ سبک برای جمع‌آوری CPU profile
+make release       # بیلد بعدی به‌طور خودکار از default.pgo استفاده می‌کند
+```
+
+بدون `Makefile` (فقط دستورات خام `go`):
+
+```bash
+go build -o masterdnsvpn-client ./cmd/client
+go build -o masterdnsvpn-server ./cmd/server
+```
+
+روی ویندوز (PowerShell):
+
+```powershell
+git clone https://github.com/hamijafayi-debug/MasterDnsVPN.git
+cd MasterDnsVPN
+go build -o masterdnsvpn-client.exe .\cmd\client
+go build -o masterdnsvpn-server.exe .\cmd\server
+```
+
+#### گام ۲.۷.۳: ساخت فایل‌های کانفیگ از روی نمونه‌ها
+
+روی لینوکس/مک:
+
+```bash
+cp client_config.toml.simple client_config.toml
+cp server_config.toml.simple server_config.toml
+cp client_resolvers.simple   client_resolvers.txt
+```
+
+روی ویندوز:
+
+```powershell
+Copy-Item client_config.toml.simple client_config.toml
+Copy-Item server_config.toml.simple server_config.toml
+Copy-Item client_resolvers.simple   client_resolvers.txt
+```
+
+#### گام ۲.۷.۴: اجرای سرور و کلاینت
+
+```bash
+./bin/masterdnsvpn-server -config server_config.toml
+./bin/masterdnsvpn-client -config client_config.toml
+```
+
+ویندوز:
+
+```powershell
+.\bin\masterdnsvpn-server.exe -config server_config.toml
+.\bin\masterdnsvpn-client.exe -config client_config.toml
+```
+
+#### گام ۲.۷.۵: اجرای تست‌ها (اختیاری ولی توصیه‌شده)
+
+برای اطمینان از سلامت بیلد قبل از deploy:
+
+```bash
+make test          # تست‌ها بدون race detector — سریع
+make test-race     # تست‌ها با race detector — کندتر ولی کامل‌تر
+make vet           # static analysis استاندارد Go
+```
+
+> 💡 اگر `make test-race` در محیط CI کند است، اول `make build` و `make test` کافی‌اند.
+
+---
+
 # بخش ۳: 🛠️ ساختار فایل‌های تنظیمات (Config) 
 
 ## بخش ۳.۱: 📂 فایل‌های مهم پروژه 

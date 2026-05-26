@@ -26,7 +26,13 @@ import (
 
 const clientRXDropLogInterval = 2 * time.Second
 
+// asyncReadPacket carries a pooled UDP read buffer from the reader worker to
+// the processor worker. Step 26 (SYNC-POOL-NONPTR): `bufPtr` holds the raw
+// *[]byte handed out by udpBufferPool.Get so it can be returned to the pool
+// without an extra slice-header allocation. `data` is the active sub-slice
+// (bufPtr[:n]) — the processor reads packet bytes from `data` only.
 type asyncReadPacket struct {
+	bufPtr    *[]byte
 	data      []byte
 	addr      *net.UDPAddr
 	localAddr string
@@ -537,8 +543,8 @@ drainRX:
 	for {
 		select {
 		case pkt := <-c.rxChannel:
-			if pkt.data != nil {
-				c.udpBufferPool.Put(pkt.data[:cap(pkt.data)])
+			if pkt.bufPtr != nil {
+				c.udpBufferPool.Put(pkt.bufPtr)
 			}
 		default:
 			return
@@ -865,10 +871,11 @@ func (c *Client) asyncReaderWorker(ctx context.Context, id int, conn *net.UDPCon
 		case <-ctx.Done():
 			return
 		default:
-			buf := c.udpBufferPool.Get().([]byte)
+			bufPtr := c.udpBufferPool.Get().(*[]byte)
+			buf := *bufPtr
 			n, addr, err := conn.ReadFromUDP(buf)
 			if err != nil {
-				c.udpBufferPool.Put(buf)
+				c.udpBufferPool.Put(bufPtr)
 				if ctx.Err() != nil {
 					return
 				}
@@ -876,7 +883,7 @@ func (c *Client) asyncReaderWorker(ctx context.Context, id int, conn *net.UDPCon
 			}
 
 			if n < 12 { // Basic DNS header length
-				c.udpBufferPool.Put(buf)
+				c.udpBufferPool.Put(bufPtr)
 				continue
 			}
 
@@ -884,17 +891,17 @@ func (c *Client) asyncReaderWorker(ctx context.Context, id int, conn *net.UDPCon
 			// DNS Header: ID(2), Flags(2)... Flags first byte bit 7 is QR.
 			if (buf[2] & 0x80) == 0 {
 				// Not a response, we are a client, we only care about responses.
-				c.udpBufferPool.Put(buf)
+				c.udpBufferPool.Put(bufPtr)
 				continue
 			}
 
 			packetData := buf[:n]
 
 			select {
-			case c.rxChannel <- asyncReadPacket{data: packetData, addr: addr, localAddr: localAddr}:
+			case c.rxChannel <- asyncReadPacket{bufPtr: bufPtr, data: packetData, addr: addr, localAddr: localAddr}:
 			default:
 				// Queue full! Drop packet and RECYCLE buffer.
-				c.udpBufferPool.Put(buf)
+				c.udpBufferPool.Put(bufPtr)
 				c.onRXDrop(addr)
 			}
 		}
@@ -912,8 +919,11 @@ func (c *Client) asyncProcessorWorker(ctx context.Context, id int) {
 		case pkt := <-c.rxChannel:
 			c.handleInboundPacket(pkt.data, pkt.addr, pkt.localAddr)
 
-			// RECYCLE buffer back to the pool.
-			c.udpBufferPool.Put(pkt.data[:cap(pkt.data)])
+			// RECYCLE buffer back to the pool. Step 26 — return the same *[]byte
+			// the reader pulled from Get so Put stays zero-allocation.
+			if pkt.bufPtr != nil {
+				c.udpBufferPool.Put(pkt.bufPtr)
+			}
 		}
 	}
 }

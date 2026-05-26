@@ -122,10 +122,6 @@ func validateSOCKSTargetHost(host string) error {
 	return nil
 }
 
-func (s *Server) dialTCPTarget(address string) (net.Conn, error) {
-	return s.dialTCPTargetContext(context.Background(), address)
-}
-
 func (s *Server) dialTCPTargetContext(ctx context.Context, address string) (net.Conn, error) {
 	dialFn := s.dialStreamUpstreamFn
 	timeout := s.socksConnectTimeout
@@ -178,10 +174,6 @@ func (s *Server) dialTCPTargetContext(ctx context.Context, address string) (net.
 		}
 		return result.conn, result.err
 	}
-}
-
-func (s *Server) dialExternalSOCKS5Target(targetPayload []byte) (net.Conn, error) {
-	return s.dialExternalSOCKS5TargetContext(context.Background(), targetPayload)
 }
 
 // acquireExternalSOCKS5Conn returns a TCP connection ready to receive a

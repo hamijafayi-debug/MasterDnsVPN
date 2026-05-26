@@ -26,19 +26,19 @@ func TestEffectiveStreamQueueOverflowMode_Resolution(t *testing.T) {
 		policy string
 		want   config.StreamQueueOverflowMode
 	}{
-		{"", config.StreamQueueOverflowBlock},                       // default
-		{"block", config.StreamQueueOverflowBlock},                  // explicit block
-		{"BLOCK", config.StreamQueueOverflowBlock},                  // case-insensitive
-		{"drop-newest", config.StreamQueueOverflowDropNewest},       //
-		{"drop_newest", config.StreamQueueOverflowDropNewest},       // underscore form
-		{"newest", config.StreamQueueOverflowDropNewest},            // short form
-		{"DROP-NEWEST", config.StreamQueueOverflowDropNewest},       // case
-		{" drop-newest ", config.StreamQueueOverflowDropNewest},     // whitespace
-		{"drop-oldest", config.StreamQueueOverflowDropOldest},       //
-		{"drop_oldest", config.StreamQueueOverflowDropOldest},       //
-		{"oldest", config.StreamQueueOverflowDropOldest},            //
-		{"nonsense", config.StreamQueueOverflowBlock},               // safe fallback
-		{"drop", config.StreamQueueOverflowBlock},                   // ambiguous → block
+		{"", config.StreamQueueOverflowBlock},                   // default
+		{"block", config.StreamQueueOverflowBlock},              // explicit block
+		{"BLOCK", config.StreamQueueOverflowBlock},              // case-insensitive
+		{"drop-newest", config.StreamQueueOverflowDropNewest},   //
+		{"drop_newest", config.StreamQueueOverflowDropNewest},   // underscore form
+		{"newest", config.StreamQueueOverflowDropNewest},        // short form
+		{"DROP-NEWEST", config.StreamQueueOverflowDropNewest},   // case
+		{" drop-newest ", config.StreamQueueOverflowDropNewest}, // whitespace
+		{"drop-oldest", config.StreamQueueOverflowDropOldest},   //
+		{"drop_oldest", config.StreamQueueOverflowDropOldest},   //
+		{"oldest", config.StreamQueueOverflowDropOldest},        //
+		{"nonsense", config.StreamQueueOverflowBlock},           // safe fallback
+		{"drop", config.StreamQueueOverflowBlock},               // ambiguous → block
 	}
 	for _, tt := range tests {
 		cfg := config.ClientConfig{StreamQueueOverflowPolicy: tt.policy}

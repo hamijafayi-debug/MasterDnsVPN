@@ -7,14 +7,15 @@
 // Step 16 — Adaptive Duplication Policy unit tests.
 //
 // These tests cover three independent surfaces:
-//   1. Balancer.GlobalLossPercent — the lock-free, cached loss estimator
-//      used by the adaptive policy on every data packet.
-//   2. Client.runtimePacketDuplicationCount — the policy decision itself:
-//      suppression when path is healthy, retention when path is lossy,
-//      default-disabled when the operator hasn't opted in, and the
-//      setup/control packet exemption.
-//   3. The metrics surface (AdaptiveDupSuppressed / AdaptiveDupApplied)
-//      so observability stays consistent with PLAN.md step 1.
+//  1. Balancer.GlobalLossPercent — the lock-free, cached loss estimator
+//     used by the adaptive policy on every data packet.
+//  2. Client.runtimePacketDuplicationCount — the policy decision itself:
+//     suppression when path is healthy, retention when path is lossy,
+//     default-disabled when the operator hasn't opted in, and the
+//     setup/control packet exemption.
+//  3. The metrics surface (AdaptiveDupSuppressed / AdaptiveDupApplied)
+//     so observability stays consistent with PLAN.md step 1.
+//
 // ==============================================================================
 package client
 

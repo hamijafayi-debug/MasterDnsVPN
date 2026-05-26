@@ -13,9 +13,11 @@ import (
 
 func TestHandleMTUDownRequestBuildsZeroFilledPayload(t *testing.T) {
 	s := &Server{
+		// Step 26 — pool holds *[]byte (mirrors production).
 		mtuProbePayloadPool: sync.Pool{
 			New: func() any {
-				return make([]byte, mtuProbeMaxDownSize)
+				buf := make([]byte, mtuProbeMaxDownSize)
+				return &buf
 			},
 		},
 	}

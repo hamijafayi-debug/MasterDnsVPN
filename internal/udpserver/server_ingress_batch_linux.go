@@ -62,17 +62,23 @@ func (s *Server) batchReadLoop(ctx context.Context, conn *net.UDPConn, reqCh cha
 	for i := range msgs {
 		msgs[i].Buffers = make(net.Buffers, 1)
 	}
+	// Step 26 — parallel slice that keeps the *[]byte we pulled from the
+	// pool, so we can hand the same pointer back to Put. Allocated once per
+	// reader goroutine (not per packet) — outside the SA6002 alloc envelope.
+	bufPtrs := make([]*[]byte, burst)
 
 	useBatch := true
 	for {
 		if useBatch {
 			// Rehydrate each Buffers[0] with a fresh pooled slice. We do
-			// this before every ReadBatch so the kernel writes directly
-			// into pooled memory and there is zero copy on the success
-			// path.
+			// Step 26 — pull *[]byte from pool for each msg slot. We keep a
+			// parallel bufPtrs slice so we can hand the original pointer
+			// back to Put without rebox-ing. This eliminates the SA6002
+			// slice-header allocation on the hottest server hot path.
 			for i := range msgs {
-				buf := s.packetPool.Get().([]byte)
-				msgs[i].Buffers[0] = buf[:cap(buf)]
+				bufPtr := s.packetPool.Get().(*[]byte)
+				bufPtrs[i] = bufPtr
+				msgs[i].Buffers[0] = (*bufPtr)[:cap(*bufPtr)]
 				msgs[i].N = 0
 				msgs[i].Addr = nil
 			}
@@ -81,8 +87,9 @@ func (s *Server) batchReadLoop(ctx context.Context, conn *net.UDPConn, reqCh cha
 			if err != nil {
 				// Release every prepared buffer — none of them is valid.
 				for i := range msgs {
-					if msgs[i].Buffers[0] != nil {
-						s.packetPool.Put(msgs[i].Buffers[0])
+					if bufPtrs[i] != nil {
+						s.packetPool.Put(bufPtrs[i])
+						bufPtrs[i] = nil
 						msgs[i].Buffers[0] = nil
 					}
 				}
@@ -110,8 +117,9 @@ func (s *Server) batchReadLoop(ctx context.Context, conn *net.UDPConn, reqCh cha
 				m := &msgs[i]
 				addr, ok := m.Addr.(*net.UDPAddr)
 				if !ok || m.N <= 0 {
-					if m.Buffers[0] != nil {
-						s.packetPool.Put(m.Buffers[0])
+					if bufPtrs[i] != nil {
+						s.packetPool.Put(bufPtrs[i])
+						bufPtrs[i] = nil
 						m.Buffers[0] = nil
 					}
 					continue
@@ -119,28 +127,32 @@ func (s *Server) batchReadLoop(ctx context.Context, conn *net.UDPConn, reqCh cha
 				metrics.PacketsIn.Add(1)
 				metrics.BytesIn.Add(int64(m.N))
 				buf := m.Buffers[0]
+				bufPtr := bufPtrs[i]
+				bufPtrs[i] = nil
 				m.Buffers[0] = nil
 
 				select {
-				case reqCh <- request{buf: buf, size: m.N, addr: addr, conn: conn}:
+				case reqCh <- request{bufPtr: bufPtr, buf: buf, size: m.N, addr: addr, conn: conn}:
 				case <-ctx.Done():
-					s.packetPool.Put(buf)
+					s.packetPool.Put(bufPtr)
 					// Release remaining prepared buffers.
 					for j := i + 1; j < len(msgs); j++ {
-						if msgs[j].Buffers[0] != nil {
-							s.packetPool.Put(msgs[j].Buffers[0])
+						if bufPtrs[j] != nil {
+							s.packetPool.Put(bufPtrs[j])
+							bufPtrs[j] = nil
 							msgs[j].Buffers[0] = nil
 						}
 					}
 					return nil
 				default:
-					s.packetPool.Put(buf)
+					s.packetPool.Put(bufPtr)
 					s.onDrop(addr, len(reqCh), cap(reqCh))
 				}
 			}
 			for i := n; i < len(msgs); i++ {
-				if msgs[i].Buffers[0] != nil {
-					s.packetPool.Put(msgs[i].Buffers[0])
+				if bufPtrs[i] != nil {
+					s.packetPool.Put(bufPtrs[i])
+					bufPtrs[i] = nil
 					msgs[i].Buffers[0] = nil
 				}
 			}
@@ -149,10 +161,11 @@ func (s *Server) batchReadLoop(ctx context.Context, conn *net.UDPConn, reqCh cha
 
 		// Fallback path — same logic as readLoopSingle, kept inline so we
 		// don't pay a function-pointer dispatch cost per packet.
-		buffer := s.packetPool.Get().([]byte)
+		bufPtr := s.packetPool.Get().(*[]byte)
+		buffer := *bufPtr
 		nRead, addr, err := conn.ReadFromUDP(buffer)
 		if err != nil {
-			s.packetPool.Put(buffer)
+			s.packetPool.Put(bufPtr)
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
 			}
@@ -167,12 +180,12 @@ func (s *Server) batchReadLoop(ctx context.Context, conn *net.UDPConn, reqCh cha
 		metrics.BytesIn.Add(int64(nRead))
 
 		select {
-		case reqCh <- request{buf: buffer, size: nRead, addr: addr, conn: conn}:
+		case reqCh <- request{bufPtr: bufPtr, buf: buffer, size: nRead, addr: addr, conn: conn}:
 		case <-ctx.Done():
-			s.packetPool.Put(buffer)
+			s.packetPool.Put(bufPtr)
 			return nil
 		default:
-			s.packetPool.Put(buffer)
+			s.packetPool.Put(bufPtr)
 			s.onDrop(addr, len(reqCh), cap(reqCh))
 		}
 	}

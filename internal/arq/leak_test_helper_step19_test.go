@@ -9,9 +9,7 @@ package arq
 
 import (
 	"os"
-	"runtime"
 	"strconv"
-	"strings"
 )
 
 // leakDetectorSkipUnderCount historically skipped the leak detector when
@@ -44,17 +42,4 @@ func leakDetectorSkipUnderCount() bool {
 	// After Step 19.5 the fixture leak is eliminated, so we no longer
 	// need to probe runtime stacks to decide whether to skip.
 	return false
-}
-
-// countARQRetransmitLoopsAlive samples runtime.Stack and returns the
-// number of goroutines currently parked inside ARQ.retransmitLoop.
-func countARQRetransmitLoopsAlive() int {
-	buf := make([]byte, 64*1024)
-	for {
-		n := runtime.Stack(buf, true)
-		if n < len(buf) {
-			return strings.Count(string(buf[:n]), "internal/arq.(*ARQ).retransmitLoop")
-		}
-		buf = make([]byte, 2*len(buf))
-	}
 }

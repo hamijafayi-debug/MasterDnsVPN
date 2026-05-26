@@ -415,18 +415,6 @@ func (c *Client) handleSOCKSConnect(ctx context.Context, conn net.Conn, addr str
 	}
 }
 
-func (c *Client) writeSocksConnectResult(streamID uint16, rep byte) error {
-	s, ok := c.getStream(streamID)
-	if !ok || s == nil {
-		return errLateSocksResult
-	}
-
-	s.socksResultMu.Lock()
-	defer s.socksResultMu.Unlock()
-
-	return c.writeSocksConnectResultLocked(s, rep)
-}
-
 func (c *Client) writeSocksConnectResultLocked(s *Stream_client, rep byte) error {
 	if s == nil || s.NetConn == nil {
 		return errLateSocksResult

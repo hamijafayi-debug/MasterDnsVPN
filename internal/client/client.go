@@ -47,17 +47,17 @@ type Client struct {
 	nowFn             func() time.Time
 
 	// MTU States
-	syncedUploadMTU                       int
-	syncedDownloadMTU                     int
-	syncedUploadChars                     int
-	safeUploadMTU                         int
-	maxPackedBlocks                       int
-	uploadCompression                     uint8
-	downloadCompression                   uint8
-	mtuCryptoOverhead                     int
-	mtuProbeCounter                       atomic.Uint32
-	mtuTestRetries                        int
-	mtuTestTimeout                        time.Duration
+	syncedUploadMTU     int
+	syncedDownloadMTU   int
+	syncedUploadChars   int
+	safeUploadMTU       int
+	maxPackedBlocks     int
+	uploadCompression   uint8
+	downloadCompression uint8
+	mtuCryptoOverhead   int
+	mtuProbeCounter     atomic.Uint32
+	mtuTestRetries      int
+	mtuTestTimeout      time.Duration
 	// Step 14 — MTU discovery convergence knobs.
 	mtuProbeAggressive                    bool
 	mtuProbeRetryBackoff                  time.Duration
@@ -259,14 +259,18 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		maxPackedBlocks:     1,
 		responseMode:        responseMode,
 		udpBufferPool: sync.Pool{
+			// Step 26 — pool returns *[]byte (pointer-like) to avoid the slice-header
+			// heap-allocation on every Put. See PLAN.md SYNC-POOL-NONPTR. The same
+			// pattern is used by streamutil.GetPtr/PutPtr (Step 2).
 			New: func() any {
-				return make([]byte, RuntimeUDPReadBufferSize)
+				buf := make([]byte, RuntimeUDPReadBufferSize)
+				return &buf
 			},
 		},
-		resolverConns:                         make(map[string]chan pooledUDPConn),
-		resolverAddrCache:                     make(map[string]*net.UDPAddr),
-		mtuTestRetries:                        cfg.MTUTestRetries,
-		mtuTestTimeout:                        time.Duration(cfg.MTUTestTimeout * float64(time.Second)),
+		resolverConns:     make(map[string]chan pooledUDPConn),
+		resolverAddrCache: make(map[string]*net.UDPAddr),
+		mtuTestRetries:    cfg.MTUTestRetries,
+		mtuTestTimeout:    time.Duration(cfg.MTUTestTimeout * float64(time.Second)),
 		// Step 14 — copy the convergence knobs onto the client. They are
 		// read-only after construction; no locking needed on the hot path.
 		mtuProbeAggressive:                    cfg.MTUProbeAggressive,

@@ -23,7 +23,6 @@ var (
 	runs       = flag.Int("runs", 3, "Number of runs for each direction")
 	payloadMiB = flag.Int("bytes", 100*1024*1024, "Payload size in bytes (default 100MiB)")
 	forceBuild = flag.Bool("force-build", true, "Force rebuilding binaries")
-	benchPort  = flag.Int("bench-port", 19090, "Legacy port (not used much now with dynamic targets)")
 	clientPort = flag.Int("client-port", 18080, "Port for the MasterDnsVPN client listener")
 	serverPort = flag.Int("server-port", 5300, "Port for the MasterDnsVPN server UDP listener")
 

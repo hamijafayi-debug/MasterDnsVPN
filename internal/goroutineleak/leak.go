@@ -10,10 +10,10 @@
 //
 // Usage:
 //
-//   func TestSomething(t *testing.T) {
-//     defer goroutineleak.Check(t)
-//     // ... exercise code that starts and stops goroutines ...
-//   }
+//	func TestSomething(t *testing.T) {
+//	  defer goroutineleak.Check(t)
+//	  // ... exercise code that starts and stops goroutines ...
+//	}
 //
 // The helper takes a snapshot of all goroutine stacks at the moment it is
 // installed and, when the deferred call fires, compares against a second
@@ -103,9 +103,9 @@ func DefaultIgnore() IgnoreOptions {
 			"runtime.bgscavenge",
 			"runtime.forcegchelper",
 			"created by runtime.",
-			"created by net/http.(*Server).Serve",      // pprof http server
-			"created by net/http.(*conn).serve",        // pprof http server
-			"masterdnsvpn-go/internal/goroutineleak",   // self
+			"created by net/http.(*Server).Serve",    // pprof http server
+			"created by net/http.(*conn).serve",      // pprof http server
+			"masterdnsvpn-go/internal/goroutineleak", // self
 		},
 		SettleTimeout: 500 * time.Millisecond,
 		PollInterval:  10 * time.Millisecond,

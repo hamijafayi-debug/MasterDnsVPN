@@ -24,47 +24,47 @@ import (
 )
 
 type ServerConfig struct {
-	ConfigDir                         string   `toml:"-"`
-	ConfigPath                        string   `toml:"-"`
-	ProtocolType                      string   `toml:"PROTOCOL_TYPE"`
-	UDPHost                           string   `toml:"UDP_HOST"`
-	UDPPort                           int      `toml:"UDP_PORT"`
-	UDPReaders                        int      `toml:"UDP_READERS"`
+	ConfigDir    string `toml:"-"`
+	ConfigPath   string `toml:"-"`
+	ProtocolType string `toml:"PROTOCOL_TYPE"`
+	UDPHost      string `toml:"UDP_HOST"`
+	UDPPort      int    `toml:"UDP_PORT"`
+	UDPReaders   int    `toml:"UDP_READERS"`
 	// Step 9 — UDP batch ingress. Tri-state: 0 = auto (enabled on Linux,
 	// off elsewhere — the default), 1 = force on (only effective on Linux,
 	// silently ignored on other platforms because the upstream ipv4
 	// wrapper would just call ReadFrom under the hood), 2 = force off.
 	// Local-only knob: nothing on the wire changes — purely the syscall
 	// path used by readers.
-	UDPBatchRead                      int      `toml:"UDP_BATCH_READ"`
-	SocketBufferSize                  int      `toml:"SOCKET_BUFFER_SIZE"`
-	MaxConcurrentRequests             int      `toml:"MAX_CONCURRENT_REQUESTS"`
-	DNSRequestWorkers                 int      `toml:"DNS_REQUEST_WORKERS"`
-	DeferredSessionWorkers            int      `toml:"DEFERRED_SESSION_WORKERS"`
-	DeferredSessionQueueLimit         int      `toml:"DEFERRED_SESSION_QUEUE_LIMIT"`
-	MaxPacketSize                     int      `toml:"MAX_PACKET_SIZE"`
-	DropLogIntervalSecs               float64  `toml:"DROP_LOG_INTERVAL_SECONDS"`
-	InvalidCookieWindowSecs           float64  `toml:"INVALID_COOKIE_WINDOW_SECONDS"`
-	InvalidCookieErrorThreshold       int      `toml:"INVALID_COOKIE_ERROR_THRESHOLD"`
-	SessionTimeoutSecs                float64  `toml:"SESSION_TIMEOUT_SECONDS"`
-	SessionCleanupIntervalSecs        float64  `toml:"SESSION_CLEANUP_INTERVAL_SECONDS"`
-	ClosedSessionRetentionSecs        float64  `toml:"CLOSED_SESSION_RETENTION_SECONDS"`
-	SessionInitReuseTTLSeconds        float64  `toml:"SESSION_INIT_REUSE_TTL_SECONDS"`
-	RecentlyClosedStreamTTLSeconds    float64  `toml:"RECENTLY_CLOSED_STREAM_TTL_SECONDS"`
-	RecentlyClosedStreamCap           int      `toml:"RECENTLY_CLOSED_STREAM_CAP"`
-	TerminalStreamRetentionSeconds    float64  `toml:"TERMINAL_STREAM_RETENTION_SECONDS"`
-	MaxPacketsPerBatch                int      `toml:"MAX_PACKETS_PER_BATCH"`
-	PacketBlockControlDuplication     int      `toml:"PACKET_BLOCK_CONTROL_DUPLICATION"`
-	DNSUpstreamServers                []string `toml:"DNS_UPSTREAM_SERVERS"`
-	DNSUpstreamTimeoutSecs            float64  `toml:"DNS_UPSTREAM_TIMEOUT"`
-	DNSInflightWaitTimeoutSecs        float64  `toml:"DNS_INFLIGHT_WAIT_TIMEOUT_SECONDS"`
-	SOCKSConnectTimeoutSecs           float64  `toml:"SOCKS_CONNECT_TIMEOUT"`
-	DNSFragmentAssemblyTimeoutSecs    float64  `toml:"DNS_FRAGMENT_ASSEMBLY_TIMEOUT"`
-	StreamSetupAckTTLSeconds          float64  `toml:"STREAM_SETUP_ACK_TTL_SECONDS"`
-	StreamResultPacketTTLSeconds      float64  `toml:"STREAM_RESULT_PACKET_TTL_SECONDS"`
-	StreamFailurePacketTTLSeconds     float64  `toml:"STREAM_FAILURE_PACKET_TTL_SECONDS"`
-	DNSCacheMaxRecords                int      `toml:"DNS_CACHE_MAX_RECORDS"`
-	DNSCacheTTLSeconds                float64  `toml:"DNS_CACHE_TTL_SECONDS"`
+	UDPBatchRead                   int      `toml:"UDP_BATCH_READ"`
+	SocketBufferSize               int      `toml:"SOCKET_BUFFER_SIZE"`
+	MaxConcurrentRequests          int      `toml:"MAX_CONCURRENT_REQUESTS"`
+	DNSRequestWorkers              int      `toml:"DNS_REQUEST_WORKERS"`
+	DeferredSessionWorkers         int      `toml:"DEFERRED_SESSION_WORKERS"`
+	DeferredSessionQueueLimit      int      `toml:"DEFERRED_SESSION_QUEUE_LIMIT"`
+	MaxPacketSize                  int      `toml:"MAX_PACKET_SIZE"`
+	DropLogIntervalSecs            float64  `toml:"DROP_LOG_INTERVAL_SECONDS"`
+	InvalidCookieWindowSecs        float64  `toml:"INVALID_COOKIE_WINDOW_SECONDS"`
+	InvalidCookieErrorThreshold    int      `toml:"INVALID_COOKIE_ERROR_THRESHOLD"`
+	SessionTimeoutSecs             float64  `toml:"SESSION_TIMEOUT_SECONDS"`
+	SessionCleanupIntervalSecs     float64  `toml:"SESSION_CLEANUP_INTERVAL_SECONDS"`
+	ClosedSessionRetentionSecs     float64  `toml:"CLOSED_SESSION_RETENTION_SECONDS"`
+	SessionInitReuseTTLSeconds     float64  `toml:"SESSION_INIT_REUSE_TTL_SECONDS"`
+	RecentlyClosedStreamTTLSeconds float64  `toml:"RECENTLY_CLOSED_STREAM_TTL_SECONDS"`
+	RecentlyClosedStreamCap        int      `toml:"RECENTLY_CLOSED_STREAM_CAP"`
+	TerminalStreamRetentionSeconds float64  `toml:"TERMINAL_STREAM_RETENTION_SECONDS"`
+	MaxPacketsPerBatch             int      `toml:"MAX_PACKETS_PER_BATCH"`
+	PacketBlockControlDuplication  int      `toml:"PACKET_BLOCK_CONTROL_DUPLICATION"`
+	DNSUpstreamServers             []string `toml:"DNS_UPSTREAM_SERVERS"`
+	DNSUpstreamTimeoutSecs         float64  `toml:"DNS_UPSTREAM_TIMEOUT"`
+	DNSInflightWaitTimeoutSecs     float64  `toml:"DNS_INFLIGHT_WAIT_TIMEOUT_SECONDS"`
+	SOCKSConnectTimeoutSecs        float64  `toml:"SOCKS_CONNECT_TIMEOUT"`
+	DNSFragmentAssemblyTimeoutSecs float64  `toml:"DNS_FRAGMENT_ASSEMBLY_TIMEOUT"`
+	StreamSetupAckTTLSeconds       float64  `toml:"STREAM_SETUP_ACK_TTL_SECONDS"`
+	StreamResultPacketTTLSeconds   float64  `toml:"STREAM_RESULT_PACKET_TTL_SECONDS"`
+	StreamFailurePacketTTLSeconds  float64  `toml:"STREAM_FAILURE_PACKET_TTL_SECONDS"`
+	DNSCacheMaxRecords             int      `toml:"DNS_CACHE_MAX_RECORDS"`
+	DNSCacheTTLSeconds             float64  `toml:"DNS_CACHE_TTL_SECONDS"`
 	// Step 18 — DNS cache hot tier + amortized prune.
 	//
 	//   * DNSCacheHotTierSize — number of entries kept in the small
@@ -83,13 +83,13 @@ type ServerConfig struct {
 	// All knobs are local-only — they don't change DNS/wire format,
 	// so an unmodified client talks to a hot-tier-enabled server
 	// identically to one running with the legacy code path.
-	DNSCacheHotTierSize               int      `toml:"DNS_CACHE_HOT_TIER_SIZE"`
-	DNSCachePruneIntervalSeconds      float64  `toml:"DNS_CACHE_PRUNE_INTERVAL_SECONDS"`
-	DNSCachePruneMaxScanPerShard      int      `toml:"DNS_CACHE_PRUNE_MAX_SCAN_PER_SHARD"`
-	UseExternalSOCKS5                 bool     `toml:"USE_EXTERNAL_SOCKS5"`
-	SOCKS5Auth                        bool     `toml:"SOCKS5_AUTH"`
-	SOCKS5User                        string   `toml:"SOCKS5_USER"`
-	SOCKS5Pass                        string   `toml:"SOCKS5_PASS"`
+	DNSCacheHotTierSize          int     `toml:"DNS_CACHE_HOT_TIER_SIZE"`
+	DNSCachePruneIntervalSeconds float64 `toml:"DNS_CACHE_PRUNE_INTERVAL_SECONDS"`
+	DNSCachePruneMaxScanPerShard int     `toml:"DNS_CACHE_PRUNE_MAX_SCAN_PER_SHARD"`
+	UseExternalSOCKS5            bool    `toml:"USE_EXTERNAL_SOCKS5"`
+	SOCKS5Auth                   bool    `toml:"SOCKS5_AUTH"`
+	SOCKS5User                   string  `toml:"SOCKS5_USER"`
+	SOCKS5Pass                   string  `toml:"SOCKS5_PASS"`
 	// Step 17 — Upstream SOCKS5 connection pool.
 	//
 	// When UseExternalSOCKS5 is true every new stream costs a fresh TCP
@@ -142,26 +142,26 @@ type ServerConfig struct {
 	ARQTerminalAckWaitTimeoutSec      float64  `toml:"ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS"`
 	// Step 5 — fast-retransmit & retx budget. Local-only knobs (not on the
 	// wire). 0 = library default; negative semantics mirror the client.
-	ARQFastRetxThreshold              int      `toml:"ARQ_FAST_RETX_THRESHOLD"`
-	ARQRetxBudgetPerSecond            int      `toml:"ARQ_RETX_BUDGET_PER_SECOND"`
-	MaxAllowedClientActiveSessions    int      `toml:"MAX_ALLOWED_CLIENT_ACTIVE_SESSION"`
-	MaxAllowedClientActiveStreams     int      `toml:"MAX_ALLOWED_CLIENT_ACTIVE_STREAMS_PER_SESSION"`
-	ClientMaxPacketDuplicationCount   int      `toml:"MAX_ALLOWED_CLIENT_PACKET_DUPLICATION_COUNT"`
-	ClientMaxSetupDuplicationCount    int      `toml:"MAX_ALLOWED_CLIENT_SETUP_PACKET_DUPLICATION_COUNT"`
-	ClientMaxUploadMTU                int      `toml:"MAX_ALLOWED_CLIENT_UPLOAD_MTU"`
-	ClientMaxDownloadMTU              int      `toml:"MAX_ALLOWED_CLIENT_DOWNLOAD_MTU"`
-	ClientMaxRxTxWorkers              int      `toml:"MAX_ALLOWED_CLIENT_RX_TX_WORKERS"`
-	ClientMinPingAggressiveInterval   float64  `toml:"MIN_ALLOWED_CLIENT_PING_AGGRESSIVE_INTERVAL_SECONDS"`
-	ClientMaxPacketsPerBatch          int      `toml:"MAX_ALLOWED_CLIENT_PACKETS_PER_BATCH"`
-	ClientMaxARQWindowSize            int      `toml:"MAX_ALLOWED_CLIENT_ARQ_WINDOW_SIZE"`
-	ClientMaxARQDataNackMaxGap        int      `toml:"MAX_ALLOWED_CLIENT_ARQ_DATA_NACK_MAX_GAP"`
-	ClientMinCompressionMinSize       int      `toml:"MIN_ALLOWED_CLIENT_COMPRESSION_MIN_SIZE"`
+	ARQFastRetxThreshold            int     `toml:"ARQ_FAST_RETX_THRESHOLD"`
+	ARQRetxBudgetPerSecond          int     `toml:"ARQ_RETX_BUDGET_PER_SECOND"`
+	MaxAllowedClientActiveSessions  int     `toml:"MAX_ALLOWED_CLIENT_ACTIVE_SESSION"`
+	MaxAllowedClientActiveStreams   int     `toml:"MAX_ALLOWED_CLIENT_ACTIVE_STREAMS_PER_SESSION"`
+	ClientMaxPacketDuplicationCount int     `toml:"MAX_ALLOWED_CLIENT_PACKET_DUPLICATION_COUNT"`
+	ClientMaxSetupDuplicationCount  int     `toml:"MAX_ALLOWED_CLIENT_SETUP_PACKET_DUPLICATION_COUNT"`
+	ClientMaxUploadMTU              int     `toml:"MAX_ALLOWED_CLIENT_UPLOAD_MTU"`
+	ClientMaxDownloadMTU            int     `toml:"MAX_ALLOWED_CLIENT_DOWNLOAD_MTU"`
+	ClientMaxRxTxWorkers            int     `toml:"MAX_ALLOWED_CLIENT_RX_TX_WORKERS"`
+	ClientMinPingAggressiveInterval float64 `toml:"MIN_ALLOWED_CLIENT_PING_AGGRESSIVE_INTERVAL_SECONDS"`
+	ClientMaxPacketsPerBatch        int     `toml:"MAX_ALLOWED_CLIENT_PACKETS_PER_BATCH"`
+	ClientMaxARQWindowSize          int     `toml:"MAX_ALLOWED_CLIENT_ARQ_WINDOW_SIZE"`
+	ClientMaxARQDataNackMaxGap      int     `toml:"MAX_ALLOWED_CLIENT_ARQ_DATA_NACK_MAX_GAP"`
+	ClientMinCompressionMinSize     int     `toml:"MIN_ALLOWED_CLIENT_COMPRESSION_MIN_SIZE"`
 	// Step 12 — server-side entropy skip threshold. Same semantics as the
 	// client-side knob: 0 disables; >0 (deci-bits/byte) tells the compressor
 	// to skip the encoder when the sampled payload entropy exceeds the
 	// threshold. Local-only — wire format is unchanged.
-	CompressionEntropySkipDeciBits    int      `toml:"COMPRESSION_ENTROPY_SKIP_DECIBITS"`
-	ClientMinARQInitialRTOSeconds     float64  `toml:"MIN_ALLOWED_CLIENT_ARQ_INITIAL_RTO_SECONDS"`
+	CompressionEntropySkipDeciBits int     `toml:"COMPRESSION_ENTROPY_SKIP_DECIBITS"`
+	ClientMinARQInitialRTOSeconds  float64 `toml:"MIN_ALLOWED_CLIENT_ARQ_INITIAL_RTO_SECONDS"`
 }
 
 type ServerConfigOverrides struct {
@@ -176,48 +176,48 @@ type ServerConfigFlagBinder struct {
 
 func defaultServerConfig() ServerConfig {
 	return ServerConfig{
-		ProtocolType:                      "SOCKS5",
-		UDPHost:                           "0.0.0.0",
-		UDPPort:                           53,
-		UDPReaders:                        4,
-		SocketBufferSize:                  8 * 1024 * 1024,
-		MaxConcurrentRequests:             16384,
-		DNSRequestWorkers:                 8,
-		DeferredSessionWorkers:            4,
-		DeferredSessionQueueLimit:         4096,
-		MaxPacketSize:                     65535,
-		DropLogIntervalSecs:               2.0,
-		InvalidCookieWindowSecs:           2.0,
-		InvalidCookieErrorThreshold:       10,
-		SessionTimeoutSecs:                300.0,
-		SessionCleanupIntervalSecs:        30.0,
-		ClosedSessionRetentionSecs:        600.0,
-		SessionInitReuseTTLSeconds:        600.0,
-		RecentlyClosedStreamTTLSeconds:    600.0,
-		RecentlyClosedStreamCap:           2000,
-		TerminalStreamRetentionSeconds:    45.0,
-		MaxPacketsPerBatch:                5,
-		PacketBlockControlDuplication:     1,
-		DNSUpstreamServers:                []string{"1.1.1.1:53", "1.0.0.1:53"},
-		DNSUpstreamTimeoutSecs:            4.0,
-		DNSInflightWaitTimeoutSecs:        15.0,
-		SOCKSConnectTimeoutSecs:           120.0,
-		DNSFragmentAssemblyTimeoutSecs:    300.0,
-		StreamSetupAckTTLSeconds:          400.0,
-		StreamResultPacketTTLSeconds:      300.0,
-		StreamFailurePacketTTLSeconds:     120.0,
-		DNSCacheMaxRecords:                50000,
-		DNSCacheTTLSeconds:                300.0,
+		ProtocolType:                   "SOCKS5",
+		UDPHost:                        "0.0.0.0",
+		UDPPort:                        53,
+		UDPReaders:                     4,
+		SocketBufferSize:               8 * 1024 * 1024,
+		MaxConcurrentRequests:          16384,
+		DNSRequestWorkers:              8,
+		DeferredSessionWorkers:         4,
+		DeferredSessionQueueLimit:      4096,
+		MaxPacketSize:                  65535,
+		DropLogIntervalSecs:            2.0,
+		InvalidCookieWindowSecs:        2.0,
+		InvalidCookieErrorThreshold:    10,
+		SessionTimeoutSecs:             300.0,
+		SessionCleanupIntervalSecs:     30.0,
+		ClosedSessionRetentionSecs:     600.0,
+		SessionInitReuseTTLSeconds:     600.0,
+		RecentlyClosedStreamTTLSeconds: 600.0,
+		RecentlyClosedStreamCap:        2000,
+		TerminalStreamRetentionSeconds: 45.0,
+		MaxPacketsPerBatch:             5,
+		PacketBlockControlDuplication:  1,
+		DNSUpstreamServers:             []string{"1.1.1.1:53", "1.0.0.1:53"},
+		DNSUpstreamTimeoutSecs:         4.0,
+		DNSInflightWaitTimeoutSecs:     15.0,
+		SOCKSConnectTimeoutSecs:        120.0,
+		DNSFragmentAssemblyTimeoutSecs: 300.0,
+		StreamSetupAckTTLSeconds:       400.0,
+		StreamResultPacketTTLSeconds:   300.0,
+		StreamFailurePacketTTLSeconds:  120.0,
+		DNSCacheMaxRecords:             50000,
+		DNSCacheTTLSeconds:             300.0,
 		// Step 18 — defaults disable both the hot tier and the
 		// background pruner so existing deployments behave exactly
 		// as they did before. Operators opt in explicitly.
-		DNSCacheHotTierSize:               0,
-		DNSCachePruneIntervalSeconds:      0,
-		DNSCachePruneMaxScanPerShard:      32,
-		UseExternalSOCKS5:                 false,
-		SOCKS5Auth:                        false,
-		SOCKS5User:                        "admin",
-		SOCKS5Pass:                        "123456",
+		DNSCacheHotTierSize:          0,
+		DNSCachePruneIntervalSeconds: 0,
+		DNSCachePruneMaxScanPerShard: 32,
+		UseExternalSOCKS5:            false,
+		SOCKS5Auth:                   false,
+		SOCKS5User:                   "admin",
+		SOCKS5Pass:                   "123456",
 		// Step 17 — pool disabled by default to preserve the legacy
 		// per-stream-handshake behaviour. Operators opt in explicitly.
 		SOCKS5PoolMaxIdle:                 0,
@@ -248,22 +248,22 @@ func defaultServerConfig() ServerConfig {
 		ARQTerminalDrainTimeoutSec:        120.0,
 		ARQTerminalAckWaitTimeoutSec:      90.0,
 		// Step 5 — defaults preserve ARQ library defaults.
-		ARQFastRetxThreshold:              0,
-		ARQRetxBudgetPerSecond:            0,
-		MaxAllowedClientActiveSessions:    255,
-		MaxAllowedClientActiveStreams:     2000,
-		ClientMaxPacketDuplicationCount:   5,
-		ClientMaxSetupDuplicationCount:    6,
-		ClientMaxUploadMTU:                150,
-		ClientMaxDownloadMTU:              4096,
-		ClientMaxRxTxWorkers:              255,
-		ClientMinPingAggressiveInterval:   0.05,
-		ClientMaxPacketsPerBatch:          20,
-		ClientMaxARQWindowSize:            8000,
-		ClientMaxARQDataNackMaxGap:        255,
-		ClientMinCompressionMinSize:       120,
-		CompressionEntropySkipDeciBits:    0,
-		ClientMinARQInitialRTOSeconds:     0.05,
+		ARQFastRetxThreshold:            0,
+		ARQRetxBudgetPerSecond:          0,
+		MaxAllowedClientActiveSessions:  255,
+		MaxAllowedClientActiveStreams:   2000,
+		ClientMaxPacketDuplicationCount: 5,
+		ClientMaxSetupDuplicationCount:  6,
+		ClientMaxUploadMTU:              150,
+		ClientMaxDownloadMTU:            4096,
+		ClientMaxRxTxWorkers:            255,
+		ClientMinPingAggressiveInterval: 0.05,
+		ClientMaxPacketsPerBatch:        20,
+		ClientMaxARQWindowSize:          8000,
+		ClientMaxARQDataNackMaxGap:      255,
+		ClientMinCompressionMinSize:     120,
+		CompressionEntropySkipDeciBits:  0,
+		ClientMinARQInitialRTOSeconds:   0.05,
 	}
 }
 

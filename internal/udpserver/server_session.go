@@ -808,8 +808,10 @@ func (s *Server) handleMTUDownRequest(questionPacket []byte, _ DnsParser.LitePac
 		return nil
 	}
 
-	payloadBuffer := s.mtuProbePayloadPool.Get().([]byte)
-	defer s.mtuProbePayloadPool.Put(payloadBuffer)
+	// Step 26 — pool stores *[]byte (pointer-like). See SYNC-POOL-NONPTR.
+	payloadBufferPtr := s.mtuProbePayloadPool.Get().(*[]byte)
+	defer s.mtuProbePayloadPool.Put(payloadBufferPtr)
+	payloadBuffer := *payloadBufferPtr
 	payload := payloadBuffer[:downloadSize]
 	copy(payload[:mtuProbeCodeLength], vpnPacket.Payload[1:mtuProbeUpMinSize])
 	binary.BigEndian.PutUint16(payload[mtuProbeCodeLength:], uint16(downloadSize))

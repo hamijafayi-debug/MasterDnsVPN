@@ -210,20 +210,26 @@ func (c *Client) closeResolverConnPools() {
 
 // getRuntimeUDPBuffer retrieves a byte slice from the internal buffer pool.
 // This is used to reduce allocations during high-frequency network operations.
+// Step 26 — pool stores *[]byte; we deref and return the underlying slice.
 func (c *Client) getRuntimeUDPBuffer() []byte {
 	if c == nil {
 		return make([]byte, RuntimeUDPReadBufferSize)
 	}
 
-	buf, _ := c.udpBufferPool.Get().([]byte)
-	if cap(buf) < RuntimeUDPReadBufferSize {
+	bufPtr, _ := c.udpBufferPool.Get().(*[]byte)
+	if bufPtr == nil || cap(*bufPtr) < RuntimeUDPReadBufferSize {
 		return make([]byte, RuntimeUDPReadBufferSize)
 	}
 
-	return buf[:RuntimeUDPReadBufferSize]
+	return (*bufPtr)[:RuntimeUDPReadBufferSize]
 }
 
 // putRuntimeUDPBuffer returns a byte slice to the internal buffer pool.
+// Step 26 (SYNC-POOL-NONPTR) — the slice is wrapped in a fresh *[]byte before
+// Put so the sync.Pool stores a pointer-sized payload and avoids the slice-
+// header heap allocation. The original allocation site is responsible for
+// providing a slice sized exactly RuntimeUDPReadBufferSize; we re-slice to be
+// safe in case the caller already truncated the view (n < cap).
 func (c *Client) putRuntimeUDPBuffer(buf []byte) {
 	if c == nil || buf == nil {
 		return
@@ -232,7 +238,8 @@ func (c *Client) putRuntimeUDPBuffer(buf []byte) {
 		return
 	}
 
-	c.udpBufferPool.Put(buf[:RuntimeUDPReadBufferSize])
+	full := buf[:RuntimeUDPReadBufferSize]
+	c.udpBufferPool.Put(&full)
 }
 
 // dialUDPResolver resolves the resolver address and establishes a new UDP connection.

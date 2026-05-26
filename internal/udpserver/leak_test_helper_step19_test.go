@@ -9,9 +9,7 @@ package udpserver
 
 import (
 	"os"
-	"runtime"
 	"strconv"
-	"strings"
 )
 
 // leakDetectorSkipUnderCount reports whether the current `go test` run
@@ -46,18 +44,4 @@ func leakDetectorSkipUnderCount() bool {
 	// helper had to probe runtime.Stack to decide whether to skip; the
 	// fixture leak is gone, so the detector runs unconditionally.
 	return false
-}
-
-// countARQRetransmitLoopsAlive samples runtime.Stack and returns the
-// number of goroutines currently parked inside ARQ.retransmitLoop. Used
-// only by leak tests to decide whether they should skip.
-func countARQRetransmitLoopsAlive() int {
-	buf := make([]byte, 64*1024)
-	for {
-		n := runtime.Stack(buf, true)
-		if n < len(buf) {
-			return strings.Count(string(buf[:n]), "internal/arq.(*ARQ).retransmitLoop")
-		}
-		buf = make([]byte, 2*len(buf))
-	}
 }

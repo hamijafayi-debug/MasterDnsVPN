@@ -26,9 +26,9 @@ import (
 func validMinimalPacket() []byte {
 	// Layout (no extensions): [sid][ptype][cookie][check]
 	buf := make([]byte, 4)
-	buf[0] = 0x42  // session id
-	buf[1] = 0x01  // packet type with no extensions (depends on packetFlags table)
-	buf[2] = 0x77  // session cookie
+	buf[0] = 0x42 // session id
+	buf[1] = 0x01 // packet type with no extensions (depends on packetFlags table)
+	buf[2] = 0x77 // session cookie
 	buf[3] = computeHeaderCheckByte(buf[:3])
 	return buf
 }

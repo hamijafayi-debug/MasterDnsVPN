@@ -74,10 +74,10 @@ func benchSealOpen(b *testing.B, method int, size int) {
 }
 
 // AES-GCM seal benchmarks (the headline path: method 3 / 16-byte key).
-func BenchmarkCodecSeal_AES128_200B(b *testing.B)   { benchSeal(b, 3, 200) }
-func BenchmarkCodecSeal_AES128_1200B(b *testing.B)  { benchSeal(b, 3, 1200) }
-func BenchmarkCodecSeal_AES128_8192B(b *testing.B)  { benchSeal(b, 3, 8192) }
-func BenchmarkCodecSeal_AES256_1200B(b *testing.B)  { benchSeal(b, 5, 1200) }
+func BenchmarkCodecSeal_AES128_200B(b *testing.B)  { benchSeal(b, 3, 200) }
+func BenchmarkCodecSeal_AES128_1200B(b *testing.B) { benchSeal(b, 3, 1200) }
+func BenchmarkCodecSeal_AES128_8192B(b *testing.B) { benchSeal(b, 3, 8192) }
+func BenchmarkCodecSeal_AES256_1200B(b *testing.B) { benchSeal(b, 5, 1200) }
 
 // AES seal+open (round-trip) — relevant for upstream/downstream symmetry.
 func BenchmarkCodecSealOpen_AES128_1200B(b *testing.B) { benchSealOpen(b, 3, 1200) }

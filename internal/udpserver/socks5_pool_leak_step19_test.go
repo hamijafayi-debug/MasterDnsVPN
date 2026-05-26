@@ -26,10 +26,10 @@ func TestSOCKS5UpstreamPool_NoGoroutineLeak(t *testing.T) {
 	defer goroutineleak.Check(t)
 
 	pool := newSOCKS5UpstreamPool(
-		4,                  // maxIdle
-		1*time.Second,      // idleTTL
-		0,                  // prewarm (off — we don't want background dials)
-		"127.0.0.1:0",      // dummy addr
+		4,             // maxIdle
+		1*time.Second, // idleTTL
+		0,             // prewarm (off — we don't want background dials)
+		"127.0.0.1:0", // dummy addr
 		false,
 		func() []byte { return nil },
 		func(ctx context.Context) (net.Conn, error) {
