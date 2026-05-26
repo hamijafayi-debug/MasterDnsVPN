@@ -211,6 +211,7 @@ sudo firewall-cmd --reload
 | لینوکس (MIPS) 🐧 | `MIPS64LE` | سیستم‌های ۶۴ بیتی MIPS با endian کوچک | [دانلود نسخه لینوکس MIPS64LE ⬇️](https://github.com/hamijafayi-debug/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_MIPS64LE.zip) |
 | ترموکس / اندروید 📱 | `ARM64` | گوشی‌های اندرویدی جدید با Termux | [دانلود نسخه ترموکس ARM64 ⬇️](https://github.com/hamijafayi-debug/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Termux_ARM64.zip) |
 | ترموکس / اندروید 📱 | `ARMv7` | گوشی‌های قدیمی‌تر با محیط ۳۲ بیتی Termux | [دانلود نسخه ترموکس ARMv7 ⬇️](https://github.com/hamijafayi-debug/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Termux_ARMV7.zip) |
+| **اندروید (اپ گرافیکی)** 📱 | `Universal` | گوشی‌های اندروید ۷.۰ به بالا — اپ رسمی **MasterDnsPro** با رابط کاربری گرافیکی، بدون نیاز به Termux | [دانلود APK مستر دی‌ان‌اس پرو ⬇️](https://github.com/hamijafayi-debug/MasterDnsVPN/releases/latest/download/MasterDnsPro_Android_Universal.apk) |
 
 #### لینک‌های دانلود سرور (Server) 📤
 
