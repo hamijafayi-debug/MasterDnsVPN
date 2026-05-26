@@ -810,7 +810,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-            - name: Compute lowercase image repo name
+      - name: Compute lowercase image repo name
         id: imgname
         shell: bash
         run: |
@@ -829,4 +829,3 @@ jobs:
         run: |
           chmod +x docker/buildx-multi-platform.sh
           docker/buildx-multi-platform.sh
-
