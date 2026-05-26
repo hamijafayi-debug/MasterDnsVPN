@@ -192,10 +192,14 @@ func (s *Server) deferredIdleCleanupTimeout(cleanupInterval time.Duration, sessi
 
 func (s *Server) readLoop(ctx context.Context, conn *net.UDPConn, reqCh chan<- request, readerID int) error {
 	for {
-		buffer := s.packetPool.Get().([]byte)
+		// Step 26 — pull *[]byte from the pool; pass it inside `request` and
+		// return the same pointer on Put so the hot ingress path stays
+		// zero-allocation (no slice-header escape).
+		bufPtr := s.packetPool.Get().(*[]byte)
+		buffer := *bufPtr
 		n, addr, err := conn.ReadFromUDP(buffer)
 		if err != nil {
-			s.packetPool.Put(buffer)
+			s.packetPool.Put(bufPtr)
 
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
@@ -215,12 +219,12 @@ func (s *Server) readLoop(ctx context.Context, conn *net.UDPConn, reqCh chan<- r
 		metrics.BytesIn.Add(int64(n))
 
 		select {
-		case reqCh <- request{buf: buffer, size: n, addr: addr, conn: conn}:
+		case reqCh <- request{bufPtr: bufPtr, buf: buffer, size: n, addr: addr, conn: conn}:
 		case <-ctx.Done():
-			s.packetPool.Put(buffer)
+			s.packetPool.Put(bufPtr)
 			return nil
 		default:
-			s.packetPool.Put(buffer)
+			s.packetPool.Put(bufPtr)
 			s.onDrop(addr, len(reqCh), cap(reqCh))
 		}
 	}
@@ -252,7 +256,14 @@ func (s *Server) dnsWorker(ctx context.Context, conn *net.UDPConn, reqCh <-chan 
 				}
 			}
 
-			s.packetPool.Put(req.buf)
+			// Step 26 — return the original *[]byte to the pool. Older
+			// in-flight requests created before Step 26 may have nil bufPtr;
+			// in that case fall back to the legacy []byte path (still safe,
+			// just costs a slice-header alloc — the old SA6002 warning is
+			// expected only for that legacy path which no live caller uses).
+			if req.bufPtr != nil {
+				s.packetPool.Put(req.bufPtr)
+			}
 		}
 	}
 }

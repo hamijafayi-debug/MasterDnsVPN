@@ -143,7 +143,7 @@ func TestProcessDeferredStreamSynQueuesConnectedAndEnablesIO(t *testing.T) {
 	local, remote := net.Pipe()
 	defer remote.Close()
 
-	s.dialStreamUpstreamFn = func(network string, address string, timeoutSeconds time.Duration) (net.Conn, error) {
+	s.dialStreamUpstreamFn = func(network string, address string, timeout time.Duration) (net.Conn, error) {
 		return local, nil
 	}
 

@@ -9,23 +9,23 @@
 //
 // What these tests cover:
 //
-//   1. Hot tier hit returns the cached response (and patches the query ID).
-//   2. Hot tier miss falls through to the cold tier; the cold hit then
-//      promotes the entry into the hot tier (next lookup is hot).
-//   3. SetReady invalidates an existing hot copy so the next GetReady
-//      pulls the fresh value from the cold tier (and re-promotes).
-//   4. Cold-tier expiry removes the hot copy (lookup misses cleanly).
-//   5. Hot tier respects its bounded capacity (LRU eviction).
-//   6. Default-off: a Store created via New() with no EnableHotTier
-//      call behaves exactly as before (no hot tier, no panics).
-//   7. metrics.CacheHits / CacheMisses tick on the right paths.
-//   8. PruneExpired removes only entries whose TTL has elapsed; pending
-//      entries are skipped; the cursor advances so successive calls cover
-//      the whole shard.
-//   9. PruneExpired bounded work — a single call never scans more than
-//      maxScanPerShard entries per shard.
+//  1. Hot tier hit returns the cached response (and patches the query ID).
+//  2. Hot tier miss falls through to the cold tier; the cold hit then
+//     promotes the entry into the hot tier (next lookup is hot).
+//  3. SetReady invalidates an existing hot copy so the next GetReady
+//     pulls the fresh value from the cold tier (and re-promotes).
+//  4. Cold-tier expiry removes the hot copy (lookup misses cleanly).
+//  5. Hot tier respects its bounded capacity (LRU eviction).
+//  6. Default-off: a Store created via New() with no EnableHotTier
+//     call behaves exactly as before (no hot tier, no panics).
+//  7. metrics.CacheHits / CacheMisses tick on the right paths.
+//  8. PruneExpired removes only entries whose TTL has elapsed; pending
+//     entries are skipped; the cursor advances so successive calls cover
+//     the whole shard.
+//  9. PruneExpired bounded work — a single call never scans more than
+//     maxScanPerShard entries per shard.
 //  10. Concurrent stress under -race: parallel readers + writers + pruner
-//      never trigger a data race.
+//     never trigger a data race.
 //
 // All tests are local-only — none of them exercise the network or the
 // DNS wire format. Wire compatibility is unchanged by step 18.

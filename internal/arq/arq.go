@@ -1292,12 +1292,6 @@ func (a *ARQ) runFinalAckWatchdog(now time.Time) {
 	)
 }
 
-func (a *ARQ) clearTrackedControlPacket(packetType uint8, sequenceNum uint16, fragmentID uint8) {
-	a.mu.Lock()
-	delete(a.controlSndBuf, uint32(packetType)<<24|uint32(sequenceNum)<<8|uint32(fragmentID))
-	a.mu.Unlock()
-}
-
 func (a *ARQ) tryFinalizeRemoteEOF() {
 	a.mu.Lock()
 	waitingForCloseReadAck := a.waitingAck && a.waitingAckFor == Enums.PACKET_STREAM_CLOSE_READ
@@ -1506,12 +1500,14 @@ func (a *ARQ) ioLoop() {
 				time.Sleep(ioRetryBackoff)
 				continue
 			case ioErrorEOF:
-				transientReadSince = time.Time{}
+				// transientReadSince is no longer consulted on terminal cases
+				// — we exit the read loop right after this switch via the
+				// trailing `break`. Keeping the assignment would be dead code
+				// (SA4006).
 				errorReason = "Local App Closed Connection (EOF)"
 				a.noteClientEOF(time.Now())
 				gracefulEOF = true
 			case ioErrorClosed:
-				transientReadSince = time.Time{}
 				if a.isGracefulCloseInProgress() {
 					alreadyHandled = true
 					break
@@ -1520,7 +1516,6 @@ func (a *ARQ) ioLoop() {
 				resetRequired = true
 				resetAfterDrain = n > 0
 			default:
-				transientReadSince = time.Time{}
 				errorReason = "Read Error: " + err.Error()
 				resetRequired = true
 				resetAfterDrain = n > 0

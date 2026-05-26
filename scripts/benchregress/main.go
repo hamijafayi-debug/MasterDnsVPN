@@ -2,19 +2,21 @@
 //
 // این ابزار خودکفا و بدون وابستگی خارجی است (فقط stdlib).
 // Workflow:
-//   1) baseline.txt را از branch هدف (یا artifact ذخیره‌شده) بارگذاری می‌کند.
-//   2) current.txt را از این run بارگذاری می‌کند.
-//   3) برای هر بنچ موجود در هر دو فایل، Δ ns/op و Δ B/op را محاسبه می‌کند.
-//   4) اگر هر بنچی > threshold (پیش‌فرض 10%) کند شده، با exit code 1 خارج می‌شود.
-//   5) یک جدول markdown روی stdout و یک خلاصه روی stderr چاپ می‌کند.
+//  1. baseline.txt را از branch هدف (یا artifact ذخیره‌شده) بارگذاری می‌کند.
+//  2. current.txt را از این run بارگذاری می‌کند.
+//  3. برای هر بنچ موجود در هر دو فایل، Δ ns/op و Δ B/op را محاسبه می‌کند.
+//  4. اگر هر بنچی > threshold (پیش‌فرض 10%) کند شده، با exit code 1 خارج می‌شود.
+//  5. یک جدول markdown روی stdout و یک خلاصه روی stderr چاپ می‌کند.
 //
 // فرمت ورودی: خروجی استاندارد `go test -bench=. -benchmem`.
 // خطوط مدنظر:
-//   BenchmarkName-N    iters    ns/op    B/op allocs/op
+//
+//	BenchmarkName-N    iters    ns/op    B/op allocs/op
 //
 // استفاده:
-//   benchregress -baseline baseline.txt -current current.txt \
-//                -threshold 10 -markdown out.md
+//
+//	benchregress -baseline baseline.txt -current current.txt \
+//	             -threshold 10 -markdown out.md
 //
 // نکات:
 //   - بنچ‌های فقط در یکی از فایل‌ها (added/removed) با گزارش می‌شوند ولی fail نمی‌کنند.
@@ -34,11 +36,11 @@ import (
 
 // BenchResult یک نتیجه از یک خط بنچ‌مارک Go.
 type BenchResult struct {
-	Name      string
-	NsPerOp   float64 // مقدار میانگین در صورت چندتایی
-	BytesPerOp float64
+	Name        string
+	NsPerOp     float64 // مقدار میانگین در صورت چندتایی
+	BytesPerOp  float64
 	AllocsPerOp float64
-	Samples   int // تعداد نمونه‌های جمع‌آوری‌شده
+	Samples     int // تعداد نمونه‌های جمع‌آوری‌شده
 }
 
 func main() {
@@ -67,17 +69,17 @@ func main() {
 	names := mergeNames(baseline, current)
 
 	type Row struct {
-		Name      string
-		BaseNs    float64
-		CurNs     float64
-		DiffPct   float64
-		Regressed bool
-		Improved  bool
-		Status    string // "ok", "regressed", "improved", "added", "removed"
-		BaseB     float64
-		CurB      float64
+		Name       string
+		BaseNs     float64
+		CurNs      float64
+		DiffPct    float64
+		Regressed  bool
+		Improved   bool
+		Status     string // "ok", "regressed", "improved", "added", "removed"
+		BaseB      float64
+		CurB       float64
 		BaseAllocs float64
-		CurAllocs float64
+		CurAllocs  float64
 	}
 	rows := make([]Row, 0, len(names))
 	worstReg := 0.0
@@ -92,12 +94,12 @@ func main() {
 		case hasB && hasC:
 			diff := pctDiff(b.NsPerOp, c.NsPerOp)
 			r := Row{
-				Name:    name,
-				BaseNs:  b.NsPerOp,
-				CurNs:   c.NsPerOp,
-				DiffPct: diff,
-				BaseB:   b.BytesPerOp,
-				CurB:    c.BytesPerOp,
+				Name:       name,
+				BaseNs:     b.NsPerOp,
+				CurNs:      c.NsPerOp,
+				DiffPct:    diff,
+				BaseB:      b.BytesPerOp,
+				CurB:       c.BytesPerOp,
 				BaseAllocs: b.AllocsPerOp,
 				CurAllocs:  c.AllocsPerOp,
 			}
@@ -265,7 +267,8 @@ func parseFile(path string) (map[string]*BenchResult, error) {
 
 // parseLine یک خط بنچ Go را پارس می‌کند.
 // نمونه:
-//   BenchmarkARQ_PushRecv-8    1234567    123.4 ns/op    16 B/op    1 allocs/op
+//
+//	BenchmarkARQ_PushRecv-8    1234567    123.4 ns/op    16 B/op    1 allocs/op
 //
 // نام بنچ همراه با suffix -N (تعداد CPU) باقی می‌ماند تا تطبیق دقیق باشد.
 func parseLine(line string) (BenchResult, bool) {

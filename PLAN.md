@@ -71,6 +71,7 @@
 - [x] استپ ۲۳ — Release Hardening (build flags, PGO, strip, GOAMD64)  ✅ 2026-05-25
 - [x] استپ ۲۴ — Post-Step-23 Comprehensive Review & Bug Sweep (staticcheck-driven)  ✅ 2026-05-25
 - [x] استپ ۲۵ — Fork-Ownership Sweep (اصلاح ارجاع‌های install/CI/Docker از upstream `masterking32` به فورک `hamijafayi-debug`) (اولویت بالا — رفع باگ FORK-INSTALL-WRONG-URL)  ✅ 2026-05-25
+- [x] استپ ۲۶ — Final Cleanup & Hardening: SYNC-POOL-NONPTR refactor + dead-code sweep + gofmt + README parity (رفع باگ‌های SYNC-POOL-NONPTR-29×، U1000-35×، SA4006-5×، ST1011-1×، GOFMT-16-FILES، README-GO-VERSION-MISMATCH، README-FA-NO-BUILD-SECTION)  ✅ 2026-05-26
 
 ---
 
@@ -756,6 +757,79 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 **باگ ثبت‌شده در این استپ:**
 - `FORK-INSTALL-WRONG-URL` — رفع شد در همین استپ.
 
+### استپ ۲۶ — Final Cleanup & Hardening (SYNC-POOL-NONPTR refactor + dead-code sweep + gofmt + README parity)  ✅ 2026-05-26
+هدف: پاکسازی نهایی پروژه قبل از build production. سه دسته کار: (الف) رفع باگ deferred-شده‌ی Step 24 (SA6002 SYNC-POOL-NONPTR در ۲۹ سایت)، (ب) sweep کامل static-analysis که حالا که SA5011 رفع شده می‌تونیم باقی ۴۱ warning (U1000 dead code + SA4006 dead writes + ST1011 naming + gofmt) رو هم پاک کنیم، (پ) پاریتی مستندات (Go version در README.MD و افزودن بخش build-from-source در README_FA.MD که فقط در نسخه‌ی انگلیسی موجود بود).
+
+**روش:** قبل از شروع، baseline گرفته شد: `staticcheck ./...` → ۷۰ warning، `gofmt -l .` → ۱۶ فایل dirty. سپس به‌ترتیب اولویت impact رفع شد.
+
+**۱) SYNC-POOL-NONPTR refactor (۲۹ سایت، بزرگ‌ترین کار این استپ):**
+
+الگو: همه‌ی pool هایی که `[]byte` ذخیره می‌کردن به `*[]byte` ارتقا داده شدن. این دقیقاً همان pattern است که Step 2 با `streamutil.GetPtr/PutPtr` معرفی کرد ولی به این پکیج‌ها سرایت نکرده بود. اثر روی perf: هر `Put([]byte)` با pool که `interface{}` می‌خواهد، باعث allocation 24-byte slice-header روی heap می‌شد (Go boxing rule). با `*[]byte` pointer-like است و boxing صفر-alloc.
+
+- **`internal/client/client.go`** خط ۲۶۱ — `udpBufferPool.New` تغییر کرد به `buf := make([]byte, RuntimeUDPReadBufferSize); return &buf`.
+- **`internal/client/async_runtime.go`** — فیلد `bufPtr *[]byte` به struct `asyncReadPacket` اضافه شد، ۶ سایت Get/Put (reader + ۵ drain) به pattern `bufPtr := c.udpBufferPool.Get().(*[]byte); buf := *bufPtr` و `c.udpBufferPool.Put(bufPtr)` migrate شدن. (سایت `async_runtime_test.go:164` که از `asyncReadPacket{data: make(...)}` بدون bufPtr استفاده می‌کند بی‌خطر است چون drainQueues با nil check رد می‌شود.)
+- **`internal/client/mtu.go`** خطوط ۱۵۰۷ و ۱۵۹۷ — هر دو به `bufPtr := c.udpBufferPool.Get().(*[]byte); defer c.udpBufferPool.Put(bufPtr); buf := *bufPtr`.
+- **`internal/client/tunnel_runtime.go`** — `getRuntimeUDPBuffer` و `putRuntimeUDPBuffer` (wrapper helper ها) به pointer-pattern. هنگام `Put` slice صریحاً به `RuntimeUDPReadBufferSize` reslice می‌شود تا اندازه‌ی consistent برگردد.
+- **`internal/udpserver/server.go`** خط ۹۷ — فیلد `bufPtr *[]byte` به struct `request` اضافه شد. سه pool (`dnsUpstreamBufferPool`, `mtuProbePayloadPool`, `packetPool`) `New` فانکشن‌شون به `return &buf` به‌روز شد.
+- **`internal/udpserver/server_runtime.go`** خطوط ۱۹۵-۲۲۵ و ۲۵۵ — reader حالا `*[]byte` می‌گیره، `request` هم `bufPtr` و هم slice فعلی `buf` رو دارد، `dnsWorker` در پایان اگر `req.bufPtr != nil` آن را `Put` می‌کند.
+- **`internal/udpserver/server_ingress_batch_linux.go`** (داغ‌ترین path پروژه — per-packet در batch UDP read) — یک slice `bufPtrs := make([]*[]byte, burst)` **یک بار در ابتدای reader** allocate می‌شود (نه per-packet)، parallel با `msgs` slot ها. ۹ سایت Put migrate شدن.
+- **`internal/udpserver/dns_tunnel.go`** خطوط ۳۶۸-۳۸۹ — سه سایت converted.
+- **`internal/udpserver/server_session.go`** خط ۸۱۱ — `mtuProbePayloadPool` به pattern `payloadBufferPtr := s.mtuProbePayloadPool.Get().(*[]byte); defer s.mtuProbePayloadPool.Put(payloadBufferPtr); payloadBuffer := *payloadBufferPtr`.
+- **تست‌ها (۳ سایت):** `internal/udpserver/server_ingress_step9_test.go` (۴ pool init + ۳ Put site)، `internal/udpserver/mtu_session_test.go` (test fixture). در حین refactor یک test panic در `TestHandleMTUDownRequestBuildsZeroFilledPayload` ظاهر شد چون test fixture خودش pool داشت با `New: func() any { return make([]byte, ...) }` که type assertion `.(*[]byte)` رو می‌شکست. fix: test fixture هم به pointer pattern آپدیت شد.
+
+**۲) U1000 dead-code sweep (۳۵ symbol در ۱۸ فایل):**
+همه‌ی functionها، فیلدها، و متغیرهای حاشیه‌ای که staticcheck unused اعلام کرد حذف شدن. لیست کامل:
+- `internal/arq/arq.go` — `clearTrackedControlPacket`
+- `internal/arq/arq_test.go` — فیلد `readBlocked` در test struct
+- `internal/arq/leak_test_helper_step19_test.go` — `countARQRetransmitLoopsAlive` + imports `runtime`, `strings`
+- `internal/basecodec/lowerbase36.go` — ۴ تابع unused decode
+- `internal/client/client_utils.go` — `isHotPacketLogType`, `logInboundPacket`, `logOutboundPacket`
+- `internal/client/leak_test_helper_step19_test.go` — مشابه arq
+- `internal/client/mtu_logging.go` — `appendMTUAddedServerLine`
+- `internal/client/session.go` — فیلد `sessionInitBusyUntil`
+- `internal/client/socks_manager.go` — `writeSocksConnectResult`
+- `internal/client/tcp_stream.go` — `errLateStreamResult` + `errors` import
+- `internal/client/tunnel_query.go` — `buildTunnelTXTQuery`
+- `internal/config/client.go` — helper `defaultFloatBelow`
+- `internal/dnsparser/response.go` — ۳ OPT-record extractor unused
+- `internal/udpserver/deferred_session.go` — فیلد `sessionPressureLog` + متدهای `workerCount`/`queueLimit`
+- `internal/udpserver/leak_test_helper_step19_test.go` — مشابه arq
+- `internal/udpserver/server.go` — ۳ فیلد unused: `streamOutboundTTL`, `streamOutboundMaxRetry`, `immediateConnectedLog`
+- `internal/udpserver/server_postsession.go` — `dispatchDeferredSessionPacketOrDrop`
+- `internal/udpserver/server_utils.go` — `summarizeQName`, `isClosedStreamAwarePacketType` + imports `fmt`, `Enums`
+- `internal/udpserver/session.go` — متد `reopen`
+- `internal/udpserver/socks5_upstream.go` — `dialTCPTarget`, `dialExternalSOCKS5Target`
+- `internal/udpserver/stream_server.go` — فیلد `rxQueueMu`
+- `scripts/bench/bench.go` — متغیر `benchPort`
+
+**۳) SA4006 dead-assignment (۵ سایت):**
+- `cmd/server/main.go:80` — حذف `resolvedConfigPath = cfg.ConfigPath` که در ادامه overwrite می‌شد.
+- `internal/arq/arq.go` (۳ سایت در terminal switch cases) — `transientReadSince = time.Time{}` که قبل از `break` نوشته می‌شد و خوانده نمی‌شد.
+- `internal/dnscache/store_test.go:67` — `s := New(10, ...)` ابتدای تست که در خط بعد reassign می‌شد.
+
+**۴) ST1011 naming (۱ سایت):**
+- `internal/udpserver/stream_syn_test.go:146` — پارامتر `timeoutSeconds time.Duration` به `timeout time.Duration` تغییر نام داد (نام variable که type دارد نباید unit name داشته باشد طبق convention Go).
+
+**۵) gofmt (۱۶ فایل):**
+همه با `gofmt -w` نرمال شدن. بیشترشون از merge های قبلی trailing whitespace یا tab/space inconsistency داشتن.
+
+**۶) README.MD Go version:**
+خط ۴۳۸ نوشته بود `Go 1.24+` ولی `go.mod` به `go 1.25.0` وابسته است. تغییر داده شد به `Go 1.25` با توضیح صریح: "matches the `go` directive in `go.mod`". اگر کاربر با Go 1.24 می‌خواست build کند، dependency resolution fail می‌کرد.
+
+**۷) README_FA.MD بخش build-from-source:**
+نسخه‌ی انگلیسی بخش کامل "Run directly from source" داشت ولی نسخه‌ی فارسی فقط Docker/install-script رو پوشش می‌داد. بخش جدید **۲.۷ — 🧑‍💻 اجرای مستقیم از سورس (Go)** اضافه شد (قبل از `# بخش ۳:`) شامل: prerequisites (Go 1.25)، ۵ زیرگام (clone، build با `go build` و `make release`، تنظیم configs از sample ها، اجرا، اجرای تست‌ها با `make test` و `make test-race`).
+
+**اعتبارسنجی نهایی (بعد از همه‌ی fix‌ها):**
+- `gofmt -l .` → ۰ فایل (از ۱۶).
+- `go vet ./...` → تمیز.
+- `staticcheck ./...` → **۰ warning** (از ۷۰).
+- `go build ./...` → موفق.
+- `make release` → موفق، تولید `bin/masterdnsvpn-client-release` (~۸.۲ MB، stripped + trimpath) و `bin/masterdnsvpn-server-release` (~۸.۱ MB).
+- `go test -race -count=1 -timeout=180s ./...` → همه‌ی ۲۴ پکیج پاس در ~۳۹ ثانیه، صفر race.
+- Binary smoke test: `./bin/masterdnsvpn-server-release -version` خروجی صحیح، `strings` تأیید می‌کند تنها URL embed-شده `hamijafayi-debug/MasterDnsVPN` است (نه upstream).
+
+**باگ‌های ثبت‌شده در این استپ:** همه ۷ باگ deferred یا تازه کشف‌شده (SYNC-POOL-NONPTR، U1000، SA4006، ST1011، GOFMT-FILES، README-GO-VERSION، README-FA-NO-BUILD) در همین استپ رفع شدند. بخش `## 🐛 باگ‌های یافته‌شده` به‌روزرسانی شد.
+
 ---
 
 ## 🐛 باگ‌های یافته‌شده
@@ -776,7 +850,13 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 - **[ARQ-LIFECYCLE-2 / Step 22.5 / TEST-only / cross-test flake]** ✅ **resolved در Step 22.5** — leak detector در `internal/goroutineleak/leak.go` در `-race -count=N` (N≥۵) برای ۴ تست (`TestSOCKS5UpstreamPool_NoGoroutineLeak`, `TestSOCKS5UpstreamPool_DisabledPoolNoLeak`, `TestSessionCleanup_NoGoroutineLeak`, `TestDeferredSessionProcessor_NoGoroutineLeak`) با نرخ ~۲۵٪ false-positive می‌زد. **ریشه‌یابی واقعی**: signature-based diff کلید snapshot را با کل body stack می‌ساخت، ولی یک ARQ `retransmitLoop` در یک iteration ممکن بود در `before` در state `select` (signature A) و در `after` در state `checkRetransmits → runFinalAckWatchdog → RWMutex.Lock` (signature B) سامپل شود. detector آن را به‌صورت "+1 جدید با signature B، -1 با signature A" تفسیر می‌کرد و fail می‌داد، در حالی که عملاً **یک goroutine** بود که در طول دو snapshot جابجا شد. **fix**: تابع `signatureKey(stack)` اضافه شد که key snapshot را از روی فریم `created by ... in goroutine N` می‌سازد (با حذف goroutine-id). این frame در طول عمر goroutine **invariant** است، پس یک ARQ همیشه به یک key نگاشت می‌شود صرف‌نظر از اینکه scheduler آن را در select یا داخل helper سامپل کرده باشد. **تأیید**: `go test -race -count=50 ./internal/udpserver/` بدون هیچ FAIL، `go test -race -count=3 ./...` کامل پاس. **فقط test/detector code، production و رفتار ARQ دست‌نخورده.**
 - **[ERR-SHADOW-1 / Step 24 / PRODUCTION / silent error / crash potential]** ✅ **resolved در Step 24** — در `cmd/client/main.go:229` (مسیر `--json_base64`)، عبارت `app, err = client.BootstrapLoadedConfig(cfg, opts.logPath)` به‌جای assign به outer-scope `err`، به inner-scope `err` (که از `cfg, err := config.LoadClientConfigFromJSONBase64WithOverrides(...)` در همان case-block آمده بود) bind می‌شد. نتیجه: اگر `BootstrapLoadedConfig` خطا برمی‌گرداند، خطا silently drop می‌شد، outer `err` همچنان nil بود، چک `if err != nil` بعد از switch هرگز trigger نمی‌شد، و خط بعدی `app.PrintBanner()` با `app == nil` segfault می‌داد. **کشف**: staticcheck SA4006 روی این خط ("this value of err is never used"). **fix**: متغیرهای صریح `loadErr`/`bootstrapErr` و promotion صریح به outer `err` در پایان case. **regression**: مسیر main تستابل نبود بدون refactor بزرگ (os.Exit در فاصله)؛ تست‌های متمرکز روی SA5011 fixed-pair بسنده شدن. **production impact**: زیرا کاربران فقط هنگام استفاده از `--json_base64` با کانفیگ معتبر ولی bootstrap-fail (مثلاً resolver فایل غیرقابل خواندن) به این مسیر می‌خوردن، احتمال trigger در field کم بوده ولی غیرصفر.
 - **[NIL-DEREF-SET / Step 24 / PRODUCTION / defensive bug]** ✅ **resolved در Step 24** — سه سایت در `internal/config/client.go:1023` (ClientConfigFlagBinder.Overrides)، `internal/config/server.go:956` (ServerConfigFlagBinder.Overrides)، و `internal/client/mtu.go:688` (resolverHealthProbeTimeout) همگی الگوی یکسانی داشتن: nil-check به‌صورت دفاعی بعد از خط اول که خود receiver/pointer رو deref می‌کرد قرار گرفته بود. اگر caller واقعاً nil pass می‌کرد، panic رخ می‌داد در همان خط اول قبل از رسیدن به دفاع — یعنی دفاع موجود totally ineffective بود. **کشف**: staticcheck SA5011. **fix**: nil check رو به اول هر سه تابع منتقل کردیم. **regression**: تست‌های جدید `TestClientConfigFlagBinderOverridesOnNilReceiver` و `TestServerConfigFlagBinderOverridesOnNilReceiver` در `internal/config/` که قبل از fix panic می‌دادن و بعد از fix پاس می‌شن. **production impact**: در path اصلی این binder ها همیشه non-nil ساخته می‌شن، پس crash واقعی بعید بوده، ولی هر کد تست/extension که nil binder pass می‌کرد crash می‌داد.
-- **[SYNC-POOL-NONPTR / Step 24 / PERFORMANCE / deferred to next step]** ⏸ **ثبت شد، رفع به استپ بعد منتقل شد** — staticcheck SA6002 در ۲۹ سایت گزارش می‌کنه که این `sync.Pool.Put` ها یک slice header (24 بایت) heap-alloc می‌کنن چون argument نوع non-pointer-like است (آرگومان `interface{}` با dynamic type `[]byte`). همان مشکلی که Step 2 با معرفی `streamutil.GetPtr/PutPtr` (که `*[]byte` ست) حل کرد، ولی به این پکیج‌ها هرگز سرایت نکرد. سایت‌ها: `internal/client/async_runtime.go` ۶ سایت (drain pool)، `internal/client/mtu.go` ۲، `internal/client/tunnel_runtime.go` ۱، `internal/udpserver/dns_tunnel.go` ۳، `internal/udpserver/server_ingress_batch_linux.go` ۹ (داغ‌ترین path)، `internal/udpserver/server_runtime.go` ۴، `internal/udpserver/server_session.go` ۱، تست‌ها ۳. تخمین: روی packet rate تولیدی هر Put = ۱ heap alloc اضافه، و در hot path ingress احتمالاً > میلیون‌ها per second. رفع نیاز به refactor API های `udpBufferPool` و `packetPool` به pattern pointer-based دارد (مشابه `streamutil.GetPtr/PutPtr`) و دامنه‌ی متوسط دارد — لذا به استپ بعدی منتقل شد.
+- **[SYNC-POOL-NONPTR / Step 24 / PERFORMANCE / deferred to next step]** ✅ **resolved در Step 26** — staticcheck SA6002 در ۲۹ سایت گزارش می‌کرد که این `sync.Pool.Put` ها یک slice header (24 بایت) heap-alloc می‌کنن چون argument نوع non-pointer-like است (آرگومان `interface{}` با dynamic type `[]byte`). همان مشکلی که Step 2 با معرفی `streamutil.GetPtr/PutPtr` (که `*[]byte` ست) حل کرد، ولی به این پکیج‌ها هرگز سرایت نکرد. سایت‌ها: `internal/client/async_runtime.go` ۶ سایت (drain pool)، `internal/client/mtu.go` ۲، `internal/client/tunnel_runtime.go` ۱، `internal/udpserver/dns_tunnel.go` ۳، `internal/udpserver/server_ingress_batch_linux.go` ۹ (داغ‌ترین path)، `internal/udpserver/server_runtime.go` ۴، `internal/udpserver/server_session.go` ۱، تست‌ها ۳. **رفع در Step 26**: همه‌ی pool ها به pattern `*[]byte` ارتقا داده شدن (`New: func() any { buf := make([]byte, N); return &buf }` و در سایت‌های Put مستقیم `Put(bufPtr)`). در `server_ingress_batch_linux.go` یک slice موازی `bufPtrs := make([]*[]byte, burst)` فقط یک بار per reader allocate می‌شود (نه per-packet) تا zero-alloc واقعی حاصل شود. در struct های `asyncReadPacket` و `request` فیلد جدید `bufPtr *[]byte` اضافه شد. **تأیید**: `staticcheck ./...` → صفر SA6002، `go test -race -count=1 ./...` همه‌ی ۲۴ پکیج پاس، binary های release بدون regression تولید شدند.
+- **[U1000-DEAD-CODE / Step 26 / MAINTAINABILITY]** ✅ **resolved در Step 26** — staticcheck ۳۵ symbol unused شناسایی کرد (توابع، فیلدهای struct، متغیرها) که در ۱۸ فایل پراکنده بود. بیشترشون از refactor های قبلی (Step 17/18/19/22) باقی مانده بودن که caller هایشون حذف شده ولی declaration ها سهواً نگه داشته شده بودن. در همین استپ همگی حذف شدن. هیچ‌کدام مسیر اجرا نداشتن (compile و test پس از حذف بدون تغییر پاس کرد). لیست کامل در جزئیات استپ ۲۶ بالا.
+- **[SA4006-DEAD-WRITE / Step 26 / MAINTAINABILITY]** ✅ **resolved در Step 26** — staticcheck ۵ سایت dead-assignment کشف کرد: `cmd/server/main.go:80` (resolvedConfigPath قبل از override)، `internal/arq/arq.go` ۳ سایت در terminal switch cases (`transientReadSince = time.Time{}` قبل از `break`)، و `internal/dnscache/store_test.go:67` (تست با reassign بلافاصله). همگی حذف شدن. این‌ها باگ functional نبودن ولی reader را گمراه می‌کردن ("چرا اینجا مقدار ست می‌شه اگه استفاده نمی‌شه؟") و potential bug indicator بودن.
+- **[ST1011-PARAM-NAMING / Step 26 / STYLE]** ✅ **resolved در Step 26** — `internal/udpserver/stream_syn_test.go:146` پارامتر `timeoutSeconds time.Duration` به `timeout time.Duration` تغییر نام داد. طبق convention Go، نام variable که type صریح unit-bearing دارد (مثل `time.Duration`) نباید unit suffix داشته باشد چون redundant و misleading است.
+- **[GOFMT-DIRTY-FILES / Step 26 / STYLE]** ✅ **resolved در Step 26** — ۱۶ فایل toolchain Go `gofmt -l` را fail می‌کردن (trailing whitespace, tab/space mismatch، عمدتاً از merge های دستی). همگی با `gofmt -w` نرمال شدن. این برای CI سختگیر (که gofmt را به‌عنوان hard gate دارد) باعث شکست پایپ‌لاین در فورک می‌شد.
+- **[README-GO-VERSION-MISMATCH / Step 26 / DOCS]** ✅ **resolved در Step 26** — `README.MD` خط ۴۳۸ نوشته بود `Go 1.24+` ولی `go.mod` به `go 1.25.0` وابسته است. کاربری که با Go 1.24 می‌خواست build کند با خطای `note: module requires Go 1.25` ناامید می‌شد. تغییر داده شد به `Go 1.25 — matches the go directive in go.mod`.
+- **[README-FA-NO-BUILD-SECTION / Step 26 / DOCS]** ✅ **resolved در Step 26** — کاربر فارسی‌زبان که فقط README_FA را می‌خواند هیچ‌جا راهنمای build از سورس نمی‌دید (فقط Docker و install-script). نسخه‌ی انگلیسی این بخش را داشت. بخش جدید **۲.۷ — 🧑‍💻 اجرای مستقیم از سورس (Go)** با ۵ زیرگام (prerequisites، clone، build، configs، run، tests) قبل از `# بخش ۳:` افزوده شد.
 - **[FORK-INSTALL-WRONG-URL / Step 25 / PRODUCTION / critical / user-reported]** ✅ **resolved در Step 25** — کاربر کشف کرد که `server_linux_install.sh` در این فورک، باینری‌ها را از ریپو **upstream** (`https://github.com/masterking32/MasterDnsVPN/releases/...`) دانلود می‌کند نه از فورک خودش (`hamijafayi-debug/MasterDnsVPN`). نتیجه‌ی عملی: هر کسی این اسکریپت را اجرا می‌کرد، **نسخه‌ی قدیمی upstream** را نصب می‌کرد و تمام بهینه‌سازی‌های ۲۴ استپ گذشته را دور می‌زد. **علت ریشه‌ای**: فایل‌های install/CI/Docker از زمان فورک هرگز re-point نشده بودند. **scope باگ بسیار وسیع‌تر از اسکریپت نصب بود** — sweep جامع روی کل tree (`grep -rIn "masterking32"`) ۲۸۹ ارجاع پیدا کرد در ۱۲ گروه فایل. fix شامل: install script، Dockerfile + entrypoint + compose، CI workflow image tag، runtime banner در سرور و کلاینت (که URL را در stdout چاپ می‌کرد)، و همه‌ی لینک‌های download/clone در README ها. credit lines سازنده‌ی اصلی (`Author: MasterkinG32` در فایل‌های Go، خط `Developed by` در README، profile link `https://github.com/masterking32`) **عمداً نگه داشته شدند** — این‌ها معرف **سازنده** هستند نه owner ریپو، حذف‌شان نقض attribution است. تأیید پس از اصلاح: `strings` روی binary های ساخته‌شده‌ی `server` و `client` تنها URL embed-شده فورک را نشان می‌دهد. تست‌های `-race` روی پکیج‌های متأثر همگی پاس.
 
 ---

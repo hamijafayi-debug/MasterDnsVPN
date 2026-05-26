@@ -73,12 +73,3 @@ func (c *Client) buildEncodedAutoWithCompressionTrace(options VpnProto.BuildOpti
 	}
 	return c.codec.EncryptAndEncodeBytes(raw)
 }
-
-// buildTunnelTXTQuery builds an encoded tunnel query with automatic option handling.
-func (c *Client) buildTunnelTXTQuery(domain string, options VpnProto.BuildOptions) ([]byte, error) {
-	encoded, err := c.buildEncodedAutoWithCompressionTrace(options)
-	if err != nil {
-		return nil, err
-	}
-	return buildTunnelTXTQuestionBytes(domain, encoded)
-}

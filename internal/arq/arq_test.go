@@ -216,11 +216,10 @@ func (c *transientReadConn) Close() error {
 }
 
 type transientWriteConn struct {
-	mu          sync.Mutex
-	failWrites  int
-	writes      [][]byte
-	closed      bool
-	readBlocked bool
+	mu         sync.Mutex
+	failWrites int
+	writes     [][]byte
+	closed     bool
 }
 
 func (c *transientWriteConn) Read(_ []byte) (int, error) {

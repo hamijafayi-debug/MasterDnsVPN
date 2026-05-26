@@ -365,12 +365,15 @@ func (s *Server) queryOneUpstream(upstream string, rawQuery []byte, timeout time
 		return nil, err
 	}
 
-	buffer := s.dnsUpstreamBufferPool.Get().([]byte)
+	// Step 26 — pull *[]byte (pointer-like) so Put avoids the slice-header
+	// heap allocation on every DNS upstream fetch.
+	bufPtr := s.dnsUpstreamBufferPool.Get().(*[]byte)
+	buffer := *bufPtr
 	n, readErr := conn.Read(buffer)
 	_ = conn.Close()
 
 	if readErr != nil || n == 0 {
-		s.dnsUpstreamBufferPool.Put(buffer)
+		s.dnsUpstreamBufferPool.Put(bufPtr)
 		if readErr == nil {
 			return nil, ErrInvalidDNSUpstream
 		}
@@ -379,14 +382,14 @@ func (s *Server) queryOneUpstream(upstream string, rawQuery []byte, timeout time
 
 	if len(rawQuery) >= 2 && n >= 2 {
 		if buffer[0] != rawQuery[0] || buffer[1] != rawQuery[1] {
-			s.dnsUpstreamBufferPool.Put(buffer)
+			s.dnsUpstreamBufferPool.Put(bufPtr)
 			return nil, ErrInvalidDNSUpstream
 		}
 	}
 
 	response := make([]byte, n)
 	copy(response, buffer[:n])
-	s.dnsUpstreamBufferPool.Put(buffer)
+	s.dnsUpstreamBufferPool.Put(bufPtr)
 	return response, nil
 }
 

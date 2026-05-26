@@ -8,7 +8,6 @@ package client
 
 import (
 	"context"
-	"errors"
 	"net"
 	"time"
 
@@ -16,8 +15,6 @@ import (
 	Enums "masterdnsvpn-go/internal/enums"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
-
-var errLateStreamResult = errors.New("late stream result for closed or terminal local stream")
 
 func (c *Client) HandleTCPConnect(_ context.Context, conn net.Conn) {
 	streamID, ok := c.get_new_stream_id()

@@ -33,18 +33,17 @@ type deferredSessionWorker struct {
 }
 
 type deferredSessionProcessor struct {
-	log                *logger.Logger
-	workers            []deferredSessionWorker
-	wg                 sync.WaitGroup
-	mu                 sync.Mutex
-	laneWorker         map[deferredSessionLane]int
-	cancelled          map[deferredSessionLane]struct{}
-	running            map[deferredSessionLane]context.CancelFunc
-	sessionPending     map[uint8]int32
-	sessionPendingCap  int32
-	sessionPressureLog throttledLogState
-	backlogHighLog     throttledLogState
-	nextWorker         int
+	log               *logger.Logger
+	workers           []deferredSessionWorker
+	wg                sync.WaitGroup
+	mu                sync.Mutex
+	laneWorker        map[deferredSessionLane]int
+	cancelled         map[deferredSessionLane]struct{}
+	running           map[deferredSessionLane]context.CancelFunc
+	sessionPending    map[uint8]int32
+	sessionPendingCap int32
+	backlogHighLog    throttledLogState
+	nextWorker        int
 }
 
 func deriveDeferredSessionPendingCap(workerCount int, queueLimit int) int32 {
@@ -420,20 +419,6 @@ func (p *deferredSessionProcessor) maybeLogPressureLocked(workerIdx int, lane de
 	if !p.backlogHighLog.allow(fmt.Sprintf("worker:%d:session:%d", workerIdx, lane.sessionID), time.Now(), time.Second) {
 		return
 	}
-}
-
-func (p *deferredSessionProcessor) workerCount() int {
-	if p == nil {
-		return 0
-	}
-	return len(p.workers)
-}
-
-func (p *deferredSessionProcessor) queueLimit() int {
-	if p == nil || len(p.workers) == 0 {
-		return 0
-	}
-	return cap(p.workers[0].jobs)
 }
 
 func (p *deferredSessionProcessor) sessionCap() int32 {

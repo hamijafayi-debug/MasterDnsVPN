@@ -64,16 +64,10 @@ func TestStore_BinaryPersistence(t *testing.T) {
 }
 
 func TestStore_Sharding(t *testing.T) {
-	s := New(10, time.Hour, time.Minute)
 	now := time.Now()
 
-	// Fill shard-limited capacity
-	// Since maxRecords is 10, each shard gets 10/32 = 0?
-	// Ah, I set limit to maxRecords/shardCount in code.
-	// If maxRecords is 10, limit is 0 (set to 1).
-
-	// Let's use more records
-	s = New(100, time.Hour, time.Minute) // 100/32 = 3 per shard
+	// 100/32 = 3 per shard — exercises the per-shard cap path.
+	s := New(100, time.Hour, time.Minute)
 
 	for i := 0; i < 200; i++ {
 		domain := "domain" + string(rune(i))

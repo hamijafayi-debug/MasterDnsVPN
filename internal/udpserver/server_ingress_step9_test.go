@@ -27,9 +27,9 @@ import (
 // semantics.
 func TestUDPBatchReadEnabledTriState(t *testing.T) {
 	cases := []struct {
-		name    string
-		value   int
-		wantOn  bool
+		name   string
+		value  int
+		wantOn bool
 	}{
 		{"auto-default", 0, true},
 		{"force-on", 1, true},
@@ -104,9 +104,11 @@ func newReadLoopFixture(t *testing.T) *readLoopFixture {
 		log:                  logger.New("step9-test", "ERROR"),
 		dropLogIntervalNanos: int64(2 * time.Second),
 	}
+	// Step 26 — pool holds *[]byte (mirrors production layout).
 	srv.packetPool = sync.Pool{
 		New: func() any {
-			return make([]byte, srv.cfg.MaxPacketSize)
+			buf := make([]byte, srv.cfg.MaxPacketSize)
+			return &buf
 		},
 	}
 
@@ -139,7 +141,14 @@ func (f *readLoopFixture) drainPackets(want int, timeout time.Duration) [][]byte
 		select {
 		case req := <-f.reqCh:
 			out = append(out, append([]byte(nil), req.buf[:req.size]...))
-			f.srv.packetPool.Put(req.buf)
+			// Step 26 — release via *[]byte if reader populated it, otherwise
+			// fall back to legacy []byte path (tests built before Step 26).
+			if req.bufPtr != nil {
+				f.srv.packetPool.Put(req.bufPtr)
+			} else {
+				buf := req.buf
+				f.srv.packetPool.Put(&buf)
+			}
 		case <-deadline:
 			return out
 		}
@@ -282,8 +291,12 @@ func TestStartReadersPicksFallbackWhenBatchDisabled(t *testing.T) {
 		log:                  logger.New("step9-test", "ERROR"),
 		dropLogIntervalNanos: int64(2 * time.Second),
 	}
+	// Step 26 — pool holds *[]byte.
 	srv.packetPool = sync.Pool{
-		New: func() any { return make([]byte, srv.cfg.MaxPacketSize) },
+		New: func() any {
+			buf := make([]byte, srv.cfg.MaxPacketSize)
+			return &buf
+		},
 	}
 
 	reqCh := make(chan request, 8)
@@ -307,7 +320,13 @@ func TestStartReadersPicksFallbackWhenBatchDisabled(t *testing.T) {
 		if req.size != 2 || req.buf[0] != 0xDE || req.buf[1] != 0xAD {
 			t.Fatalf("unexpected payload: %v", req.buf[:req.size])
 		}
-		srv.packetPool.Put(req.buf)
+		// Step 26 — release via *[]byte if reader populated it.
+		if req.bufPtr != nil {
+			srv.packetPool.Put(req.bufPtr)
+		} else {
+			buf := req.buf
+			srv.packetPool.Put(&buf)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("packet not dispatched within 2s with batch forced off")
 	}
@@ -334,7 +353,11 @@ func TestReadLoopOnDropCountsIncrement(t *testing.T) {
 		log:                  logger.New("step9-test", "ERROR"),
 		dropLogIntervalNanos: int64(2 * time.Second),
 	}
-	srv.packetPool = sync.Pool{New: func() any { return make([]byte, srv.cfg.MaxPacketSize) }}
+	// Step 26 — pool holds *[]byte.
+	srv.packetPool = sync.Pool{New: func() any {
+		buf := make([]byte, srv.cfg.MaxPacketSize)
+		return &buf
+	}}
 
 	// Capacity-zero channel — every send drops.
 	reqCh := make(chan request)
@@ -421,7 +444,11 @@ func benchIngress(b *testing.B, runLoop func(*Server, context.Context, *net.UDPC
 		log:                  logger.New("step9-test", "ERROR"),
 		dropLogIntervalNanos: int64(time.Hour), // disable drop logging noise
 	}
-	srv.packetPool = sync.Pool{New: func() any { return make([]byte, srv.cfg.MaxPacketSize) }}
+	// Step 26 — pool holds *[]byte.
+	srv.packetPool = sync.Pool{New: func() any {
+		buf := make([]byte, srv.cfg.MaxPacketSize)
+		return &buf
+	}}
 
 	reqCh := make(chan request, 8192)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -441,7 +468,12 @@ func benchIngress(b *testing.B, runLoop func(*Server, context.Context, *net.UDPC
 		defer close(consumerDone)
 		for req := range reqCh {
 			atomic.AddInt64(&received, 1)
-			srv.packetPool.Put(req.buf)
+			if req.bufPtr != nil {
+				srv.packetPool.Put(req.bufPtr)
+			} else {
+				buf := req.buf
+				srv.packetPool.Put(&buf)
+			}
 		}
 	}()
 
@@ -484,4 +516,3 @@ func benchIngress(b *testing.B, runLoop func(*Server, context.Context, *net.UDPC
 	close(reqCh)
 	<-consumerDone
 }
-

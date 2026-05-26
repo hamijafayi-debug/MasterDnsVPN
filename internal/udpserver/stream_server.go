@@ -22,7 +22,6 @@ type Stream_server struct {
 	mu        sync.RWMutex
 	txQueueMu sync.Mutex
 	cleanupMu sync.Once
-	rxQueueMu sync.Mutex
 
 	ID        uint16
 	SessionID uint8

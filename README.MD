@@ -435,7 +435,7 @@ Then run:
 
 #### Prerequisite
 
-- Go `1.24` or newer
+- Go `1.25` or newer (matches the `go` directive in `go.mod`)
 
 #### Build from source
 

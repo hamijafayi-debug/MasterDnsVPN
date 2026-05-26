@@ -49,9 +49,9 @@ func FuzzParseDNSRequestLite(f *testing.F) {
 // pointer-jump / lowercase / max-label-length paths without going through
 // the full request validation.
 func FuzzParseName(f *testing.F) {
-	f.Add([]byte("\x07example\x03com\x00"))                  // simple name
-	f.Add([]byte("\x03foo\xc0\x00"))                         // pointer
-	f.Add([]byte("\x03FoO\x03BaR\x00"))                      // mixed case
+	f.Add([]byte("\x07example\x03com\x00"))                     // simple name
+	f.Add([]byte("\x03foo\xc0\x00"))                            // pointer
+	f.Add([]byte("\x03FoO\x03BaR\x00"))                         // mixed case
 	f.Add([]byte("\x40toolonglabelthatexceedssixtythreebytes")) // too-long label
 	f.Add([]byte{})
 

@@ -330,11 +330,6 @@ func (s *Server) handlePackedControlBlocksRequest(vpnPacket VpnProto.Packet, ses
 	return handled || sawBlock
 }
 
-func (s *Server) dispatchDeferredSessionPacketOrDrop(vpnPacket VpnProto.Packet, reason string, run func(context.Context)) bool {
-	result := s.dispatchDeferredSessionPacketTracked(vpnPacket, reason, run)
-	return result != deferredDispatchDropped
-}
-
 func deferredTrackedPacketKey(packet VpnProto.Packet) uint64 {
 	return uint64(packet.SessionID)<<48 |
 		uint64(packet.StreamID)<<32 |

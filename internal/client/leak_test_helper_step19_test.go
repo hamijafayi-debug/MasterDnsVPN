@@ -9,9 +9,7 @@ package client
 
 import (
 	"os"
-	"runtime"
 	"strconv"
-	"strings"
 )
 
 // leakDetectorSkipUnderCount reports whether the current `go test` run is
@@ -50,17 +48,4 @@ func leakDetectorSkipUnderCount() bool {
 	// resolved, so we no longer probe runtime stacks — the detector
 	// runs unconditionally and treats any survivor as a real bug.
 	return false
-}
-
-// countARQRetransmitLoopsAlive samples runtime.Stack and returns the
-// number of goroutines currently parked inside ARQ.retransmitLoop.
-func countARQRetransmitLoopsAlive() int {
-	buf := make([]byte, 64*1024)
-	for {
-		n := runtime.Stack(buf, true)
-		if n < len(buf) {
-			return strings.Count(string(buf[:n]), "internal/arq.(*ARQ).retransmitLoop")
-		}
-		buf = make([]byte, 2*len(buf))
-	}
 }

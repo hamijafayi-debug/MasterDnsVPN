@@ -233,7 +233,6 @@ func (s *sessionStore) storeByID(sessionID uint8, record *sessionRecord) {
 	s.byID[sessionID].Store(record)
 }
 
-
 func newSessionStore(orphanQueueCap int, streamQueueCap int, options ...any) *sessionStore {
 	if orphanQueueCap < 1 {
 		orphanQueueCap = 8
@@ -752,13 +751,6 @@ func (r *sessionRecord) markClosed() {
 		return
 	}
 	atomic.StoreUint32(&r.closedFlag, 1)
-}
-
-func (r *sessionRecord) reopen() {
-	if r == nil {
-		return
-	}
-	atomic.StoreUint32(&r.closedFlag, 0)
 }
 
 func (r *sessionRecord) isClosed() bool {
