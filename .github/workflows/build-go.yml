@@ -810,6 +810,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+            - name: Compute lowercase image repo name
+        id: imgname
+        shell: bash
+        run: |
+          repo_lc="$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          echo "repo_lc=${repo_lc}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push multi-arch Docker image
         shell: bash
         env:
@@ -817,8 +824,9 @@ jobs:
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
-          IMAGE_REFS: masterking32/masterdnsvpn:${{ needs.preflight.outputs.release_tag }},masterking32/masterdnsvpn:latest
+          IMAGE_REFS: ${{ steps.imgname.outputs.repo_lc }}:${{ needs.preflight.outputs.release_tag }},${{ steps.imgname.outputs.repo_lc }}:latest
           PLATFORMS: ${{ env.PLATFORMS }}
         run: |
           chmod +x docker/buildx-multi-platform.sh
           docker/buildx-multi-platform.sh
+
