@@ -233,6 +233,7 @@ For convenience, prebuilt client and server binaries are published in the releas
 | Linux (MIPS) 🐧 | `MIPS64LE` | 64-bit little-endian MIPS Linux systems | [Download Linux MIPS64LE Client ⬇️](https://github.com/hamijafayi-debug/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_MIPS64LE.zip) |
 | Termux / Android 📱 | `ARM64` | Modern Android phones running Termux | [Download Termux ARM64 Client ⬇️](https://github.com/hamijafayi-debug/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Termux_ARM64.zip) |
 | Termux / Android 📱 | `ARMv7` | Older Android phones running 32-bit Termux environments | [Download Termux ARMv7 Client ⬇️](https://github.com/hamijafayi-debug/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Termux_ARMV7.zip) |
+| **Android (Graphical APK)** 📱 | `Universal` | Android 7.0+ phones — official **MasterDnsPro** GUI app, no Termux required | [Download MasterDnsPro APK ⬇️](https://github.com/hamijafayi-debug/MasterDnsVPN/releases/latest/download/MasterDnsPro_Android_Universal.apk) |
 
 #### Server Download Links 📤
 
