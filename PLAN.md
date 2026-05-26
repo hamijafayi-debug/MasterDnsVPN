@@ -72,7 +72,7 @@
 - [x] استپ ۲۴ — Post-Step-23 Comprehensive Review & Bug Sweep (staticcheck-driven)  ✅ 2026-05-25
 - [x] استپ ۲۵ — Fork-Ownership Sweep (اصلاح ارجاع‌های install/CI/Docker از upstream `masterking32` به فورک `hamijafayi-debug`) (اولویت بالا — رفع باگ FORK-INSTALL-WRONG-URL)  ✅ 2026-05-25
 - [x] استپ ۲۶ — Final Cleanup & Hardening: SYNC-POOL-NONPTR refactor + dead-code sweep + gofmt + README parity (رفع باگ‌های SYNC-POOL-NONPTR-29×، U1000-35×، SA4006-5×، ST1011-1×، GOFMT-16-FILES، README-GO-VERSION-MISMATCH، README-FA-NO-BUILD-SECTION)  ✅ 2026-05-26
-- [x] استپ ۲۷ — Multi-Platform Distribution & Android APK Pipeline: ساخت workflow callable برای APK رسمی **MasterDnsPro** + اسکریپت idempotent نصب + رفع بدهی Go 1.21→1.25 در CI. پکیج کامل در `docs/ci-templates/` و `docs/step27-ci-workflow-patch.md` (الگوی step23/25). اقدامات دستی workflow + secrets/variables + فورک WhiteDNS باقی‌مانده. ✅ 2026-05-26 (پیاده‌سازی repo)
+- [x] استپ ۲۷ — Multi-Platform Distribution & Android APK Pipeline: workflow callable برای APK رسمی **MasterDnsPro** + رفع بدهی Go 1.21→1.25 در CI. **تغییرات workflow توسط کاربر دستی روی GitHub اعمال شد** (commit‌های `4bc4af0`، `624692e`، `d6091c1`). سند تاریخی در `docs/step27-ci-workflow-patch.md`. اقدامات دستی secrets/variables + فورک WhiteDNS باقی‌مانده. ✅ 2026-05-26
 
 ---
 
@@ -839,31 +839,29 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
 
 **نکته‌ی برند مهم:** اپ اندروید مرجع (`https://github.com/iampedii/WhiteDNS`) **هیچ‌کدام از ۲۶ استپ بهبود ما را پشتیبانی نمی‌کند** چون به هسته‌ی StormDNS بسته شده است. به همین دلیل استراتژی این است که فورک خصوصی از WhiteDNS بسازیم و submodule هسته را با همین webapp جایگزین کنیم تا APK خودش از تمام ۲۶ استپ بهره ببرد.
 
-**محدودیت push:** همان‌طور که در استپ‌های ۲۳ و ۲۵ پیش آمد، GitHub App سندباکس بدون permission `workflows` نمی‌تواند فایل‌های داخل `.github/workflows/` ایجاد یا ویرایش کند. به همین دلیل همه‌ی تغییرات workflow در `docs/ci-templates/` به‌صورت آماده‌ی copy/paste + اسکریپت `install.sh` idempotent بسته‌بندی شده‌اند، و یک سند راهنمای استاندارد `docs/step27-ci-workflow-patch.md` (هم‌خوان با الگوی step23/25) نحوه‌ی نصب را قدم‌به‌قدم توضیح می‌دهد.
+**محدودیت push:** همان‌طور که در استپ‌های ۲۳ و ۲۵ پیش آمد، GitHub App سندباکس بدون permission `workflows` نمی‌تواند فایل‌های داخل `.github/workflows/` ایجاد یا ویرایش کند. به همین دلیل تغییرات workflow ابتدا در PR #19 به‌صورت patch در `docs/ci-templates/` پیشنهاد شدند، **سپس کاربر آن‌ها را دستی از طریق GitHub web UI روی main اعمال کرد** (در commit‌های `4bc4af0`، `624692e`، `d6091c1` و غیره). پس از اعمال، فایل‌های موقت `docs/ci-templates/` حذف شدند و فقط سند تاریخی `docs/step27-ci-workflow-patch.md` (هم‌خوان با الگوی step23/25) باقی ماند.
 
 **زیر-استپ‌ها:**
 
-- [x] **27.1 — رفع نسخه Go در CI** (اولویت بالا، آماده در patch)
-  - `.github/workflows/build-go.yml` خط ۲۴۸: `go-version: "1.21"` → `"1.25"`
-  - `.github/workflows/build-test.yml` خط ۲۴۷: `go-version: "1.21"` → `"1.25"`
+- [x] **27.1 — رفع نسخه Go در CI** ✅ اعمال‌شده دستی توسط کاربر
+  - `.github/workflows/build-go.yml` خط ۲۴۸: `go-version: "1.21"` → `"1.25"` ✅
+  - `.github/workflows/build-test.yml` خط ۲۴۷: `go-version: "1.21"` → `"1.25"` ✅
   - دلیل: `go.mod` می‌گوید `go 1.25.0`؛ CI با ۱.۲۱ نمی‌تواند بسازد و در اولین تغییر در cache با `requires go 1.25.0` fail می‌شود.
-  - **اعمال:** گام ۲ در `docs/ci-templates/install.sh`
 
-- [x] **27.2 — افزودن workflow `build-android-apk.yml`** (callable, آماده در `docs/ci-templates/`)
+- [x] **27.2 — افزودن workflow `build-android-apk.yml`** ✅ اعمال‌شده دستی توسط کاربر
+  - مسیر فعلی: `.github/workflows/build-android-apk.yml` (روی main)
   - `on: [workflow_dispatch, workflow_call]` تا job اصلی release بتواند آن را call کند.
   - مرحله‌های اصلی: checkout repo اپ اندروید (با `submodules: recursive`)، تأیید اینکه submodule هسته به MasterDnsVPN webapp اشاره می‌کند (نه StormDNS)، JDK 17 + Android SDK + NDK 27.2 + Go 1.25، `./gradlew assembleRelease`، locate APK، sign با `r0adkll/sign-android-release@v1`، rename به `MasterDnsPro_Android_Universal.apk` با `.sha256` همراه، upload به‌عنوان artifact `android-apk`.
   - **حالت Soft-skip:** اگر variable `ANDROID_APP_REPO` ست نشده باشد، workflow با warning موفقانه exit می‌شود (نه fail) تا release دسکتاپ همیشه green بماند.
   - **حالت Unsigned-fallback:** اگر هرکدام از secret‌های امضا (`ANDROID_SIGNING_KEY`, `ANDROID_KEY_ALIAS`, `ANDROID_KEYSTORE_PASS`, `ANDROID_KEY_PASS`) موجود نباشد، APK ناامضا upload می‌شود با warning مشهود.
-  - **اعمال:** گام ۱ در `docs/ci-templates/install.sh` (کپی فایل به `.github/workflows/`)
 
-- [x] **27.3 — یکپارچه‌سازی APK با job Release** (snippet‌ها آماده در `install.sh`)
-  - تغییرات در `build-go.yml` که `install.sh` اعمال می‌کند:
-    - گسترش الگوی `find` در ساخت SHA256SUMS از `*.zip` و `*.tar.gz` به `*.apk` نیز.
-    - افزودن `release_assets/**/*.apk` به `files:` در `softprops/action-gh-release@v1`.
-    - افزودن job میانی `build-android` بالای job `release` با `uses: ./.github/workflows/build-android-apk.yml` و `secrets: inherit`.
-    - افزودن `build-android` به `needs:` در job `release`.
-    - افزودن `if: ${{ always() && needs.build.result == 'success' }}` به job release تا APK اختیاری باشد ولی شکست soft-skip باعث drop release دسکتاپ نشود.
-  - **اعمال:** گام‌های ۳، ۴، ۵ در `docs/ci-templates/install.sh` با Python regex/string-replacement (idempotent).
+- [x] **27.3 — یکپارچه‌سازی APK با job Release** ✅ اعمال‌شده دستی توسط کاربر
+  - تغییرات در `build-go.yml` که الان روی main هستند:
+    - گسترش الگوی `find` در ساخت SHA256SUMS از `*.zip` و `*.tar.gz` به `*.apk` نیز. ✅
+    - افزودن `release_assets/**/*.apk` به `files:` در `softprops/action-gh-release@v1`. ✅
+    - افزودن job میانی `build-android` بالای job `release` با `uses: ./.github/workflows/build-android-apk.yml` و `secrets: inherit`. ✅ (خط ۶۴۷)
+    - افزودن `build-android` به `needs:` در job `release`. ✅ (`needs: [preflight, build, build-android]`)
+    - افزودن `if: ${{ always() && needs.build.result == 'success' }}` به job release تا APK اختیاری باشد ولی شکست soft-skip باعث drop release دسکتاپ نشود. ✅
 
 - [x] **27.4 — بروزرسانی README.MD و README_FA.MD**
   - افزودن ردیف **Android APK** بعد از ردیف Termux/Android در جدول کلاینت:
@@ -903,21 +901,21 @@ E2E روی loopback به throughput syscall محدود نمیشه (مسیر سن
   7. مقدار variable `ANDROID_APP_REPO` در همین repo (webapp) را به آدرس فورک ست کنید.
 
 **معیار قبولی:**
-- [x] فایل `docs/ci-templates/build-android-apk.yml` معتبر (YAML) و callable است.
-- [x] فایل `docs/ci-templates/install.sh` idempotent و قابل اجرای چندباره است؛ تست شد که در اجرای دوم همه‌ی ۵ گام skip می‌شوند، و YAML خروجی هر سه workflow معتبر است.
-- [x] `docs/ci-templates/README.md` هم اسکریپت `install.sh` و هم نصب کاملاً دستی را مستند می‌کند.
-- [x] `docs/step27-ci-workflow-patch.md` با الگوی استاندارد پروژه (هم‌خوان با step23/25) راهنمای کامل اعمال patch را دارد.
-- [x] README فارسی/انگلیسی ردیف Android APK با لینک مستقیم به `releases/latest/download/MasterDnsPro_Android_Universal.apk` دارند.
-- [ ] (دستی، خارج از سندباکس) `bash docs/ci-templates/install.sh` اجرا شده، تغییرات commit و push شده‌اند. (بعد از این، همه‌ی ۵ معیار آماده‌سازی workflow صحیح خواهند بود.)
-- [ ] (دستی، خارج از سندباکس) variable `ANDROID_APP_REPO` در Settings repo ست شده.
-- [ ] (دستی، خارج از سندباکس) ۴ secret امضا در Settings repo ست شده.
+- [x] فایل `.github/workflows/build-android-apk.yml` معتبر (YAML) و callable است و روی main وجود دارد. ✅
+- [x] `.github/workflows/build-go.yml` شامل job `build-android` و wire-up کامل به release است (validation با `python3 yaml.safe_load`). ✅
+- [x] `.github/workflows/build-test.yml` و `.github/workflows/build-go.yml` هر دو از `go-version: "1.25"` استفاده می‌کنند. ✅
+- [x] `docs/step27-ci-workflow-patch.md` با الگوی استاندارد پروژه (هم‌خوان با step23/25) راهنمای تاریخی patch را دارد. ✅
+- [x] README فارسی/انگلیسی ردیف Android APK با لینک مستقیم به `releases/latest/download/MasterDnsPro_Android_Universal.apk` دارند. ✅
+- [x] **اعمال workflow توسط کاربر (دستی، خارج از سندباکس) انجام شد** ✅ 2026-05-26
+- [x] **variable `ANDROID_APP_REPO` در Settings repo ست شده** ✅ (کاربر تأیید کرد)
+- [x] **۴ secret امضا در Settings repo ست شده** ✅ (کاربر تأیید کرد)
 - [ ] (دستی، خارج از سندباکس) فورک Android ساخته شده، submodule swap انجام شده، برند به MasterDnsPro تغییر کرده.
 - [ ] (تأیید نهایی) اولین Release که trigger می‌شود، فایل `MasterDnsPro_Android_Universal.apk` را به‌صورت signed منتشر می‌کند و SHA256SUMS.txt شامل آن است.
 
 **باگ‌های ثبت‌شده در این استپ:**
-- **CI-GO-VERSION-MISMATCH** — `go-version: 1.21` در دو workflow علی‌رغم `go 1.25.0` در `go.mod`. ✅ patch آماده در `install.sh` گام ۲.
-- **DIST-NO-ANDROID-APK** — هیچ APK گرافیکی اندروید در release نبود؛ کاربران مجبور بودند Termux نصب کنند. ✅ patch آماده در `install.sh` گام‌های ۱، ۳، ۴، ۵؛ نهایی‌سازی مشروط به اقدامات دستی 27.5/27.6.
-- **PERMISSION-WORKFLOWS-DENY** (تکرار باگ از step23/25) — GitHub App سندباکس بدون permission `workflows` نمی‌تواند `.github/workflows/` را تغییر دهد. ✅ راه‌حل ثبت‌شده: `docs/ci-templates/` + `docs/step27-ci-workflow-patch.md` (الگوی استاندارد پروژه).
+- **CI-GO-VERSION-MISMATCH** — `go-version: 1.21` در دو workflow علی‌رغم `go 1.25.0` در `go.mod`. ✅ **resolved 2026-05-26**: کاربر دستی هر دو فایل را به `"1.25"` به‌روزرسانی کرد.
+- **DIST-NO-ANDROID-APK** — هیچ APK گرافیکی اندروید در release نبود؛ کاربران مجبور بودند Termux نصب کنند. ✅ **پایپ‌لاین آماده 2026-05-26**: workflow ها روی main هستند؛ APK واقعی پس از اقدام دستی 27.6 (فورک WhiteDNS + submodule swap) منتشر می‌شود.
+- **PERMISSION-WORKFLOWS-DENY** (تکرار باگ از step23/25) — GitHub App سندباکس بدون permission `workflows` نمی‌تواند `.github/workflows/` را تغییر دهد. ✅ **workaround موفق**: PR #19 با pattern docs/ + patch توسط کاربر دستی روی web UI اعمال شد. سند تاریخی در `docs/step27-ci-workflow-patch.md` نگه داشته شد.
 
 ---
 
